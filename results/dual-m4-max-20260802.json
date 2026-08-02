@@ -1,0 +1,73 @@
+{
+  "architecture": "EP2 over MLX JACCL RDMA",
+  "hardware": {
+    "coordinator": "Mac Studio, Apple M4 Max, 128 GB",
+    "rank_1": "14-inch MacBook Pro, Apple M4 Max, 128 GB",
+    "rank_1_power": "Apple 96W USB-C adapter, 94W negotiated"
+  },
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "production": {
+    "context_ceiling": 1048576,
+    "decode_slots": 6,
+    "dspark_draft_positions": 5,
+    "dspark_verify_positions": 5,
+    "ep_native_remote_route_mask": true,
+    "prefill_slots": 6,
+    "prefill_step_size": 512,
+    "shared_experts": "replicated",
+    "transport": "JACCL RDMA"
+  },
+  "measurements": {
+    "prefill_8k_before_route_mask": {
+      "prompt_tokens": 8217,
+      "throughput_tok_s": 259.0,
+      "ttft_s": 31.715
+    },
+    "prefill_8k_after_route_mask": {
+      "prompt_tokens": 8217,
+      "throughput_tok_s": 311.93,
+      "ttft_s": 26.343
+    },
+    "prefill_32k_60w": {
+      "prompt_tokens": 32799,
+      "throughput_tok_s": 184.81,
+      "ttft_s": 177.442
+    },
+    "prefill_32k_94w_final": {
+      "prompt_tokens": 32801,
+      "throughput_tok_s": 287.15,
+      "ttft_s": 114.216
+    },
+    "decode_three_position": {
+      "completion_tokens": 256,
+      "tokens_per_cycle": 2.42,
+      "visible_tok_s": 30.75
+    },
+    "decode_five_position_final": {
+      "acceptance": {
+        "d1": "59/68",
+        "d2": "45/59",
+        "d3": "36/45",
+        "d4": "27/36",
+        "d5": "23/27"
+      },
+      "completion_tokens": 256,
+      "cycles": 68,
+      "decode_s": 7.023,
+      "tokens_per_cycle": 3.76,
+      "visible_tok_s": 36.45
+    }
+  },
+  "rejected": {
+    "native_moe_for_36_route_verify": {
+      "visible_tok_s": 29.88
+    },
+    "prefill_step_1024": {
+      "prefill_8k_tok_s": 302.31
+    },
+    "shared_expert_sharding": {
+      "prefill_8k_tok_s": 329.51,
+      "visible_decode_tok_s": 23.46
+    }
+  }
+}

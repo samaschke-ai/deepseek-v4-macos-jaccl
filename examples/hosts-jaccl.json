@@ -1,0 +1,23 @@
+{
+  "backend": "jaccl",
+  "envs": [
+    "OMLX_MTP_ENABLED=1",
+    "OMLX_MTP_DRAFT_TOKENS=5",
+    "OMLX_MTP_ROWWISE_BATCH=0",
+    "DSV4_CONTROL_HOST=10.0.0.1",
+    "DSV4_CONTROL_PORT=29650",
+    "DSV4_READY_FILE=/tmp/deepseek-v4/ready"
+  ],
+  "hosts": [
+    {
+      "ssh": "127.0.0.1",
+      "ips": ["10.0.1.10"],
+      "rdma": [null, "rdma_enX"]
+    },
+    {
+      "ssh": "model-rank-1.local",
+      "ips": ["10.0.1.11"],
+      "rdma": ["rdma_enY", null]
+    }
+  ]
+}
