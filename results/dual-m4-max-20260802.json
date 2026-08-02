@@ -1,5 +1,18 @@
 {
   "architecture": "EP2 over MLX JACCL RDMA",
+  "headline_improvement": {
+    "prefill_32k": {
+      "baseline_tok_s": 178.24,
+      "final_tok_s": 287.15,
+      "improvement_percent": 61.1
+    },
+    "visible_decode": {
+      "baseline_tok_s": 25.4,
+      "final_range_tok_s": "36.45-37.77",
+      "improvement_range_percent": "43-49"
+    },
+    "provenance": "original pre-remediation production measurements"
+  },
   "hardware": {
     "coordinator": "Mac Studio, Apple M4 Max, 128 GB",
     "rank_1": "14-inch MacBook Pro, Apple M4 Max, 128 GB",

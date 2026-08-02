@@ -11,6 +11,17 @@
 - Prefill step: 512 tokens
 - API ceiling: 1,048,576 tokens
 
+## Headline result versus original production
+
+| Metric | Original production | Final accepted | Improvement |
+|---|---:|---:|---:|
+| 32K prefill | 178.24 tok/s | 287.15 tok/s | **+61.1%** |
+| Visible decode | ~25.4 tok/s | 36.45–37.77 tok/s | **+43–49%** |
+
+These original figures predate the remediation stages below. Stage-level rows
+use their immediate experiment baselines and should not be substituted for the
+full production-to-production comparison.
+
 ## Prefill
 
 The benchmark prompt repeats `benchmark context datum` with a unique nonce to
