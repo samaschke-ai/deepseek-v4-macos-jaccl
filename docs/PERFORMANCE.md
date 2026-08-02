@@ -4,7 +4,7 @@
 
 - Model: official `deepseek-ai/DeepSeek-V4-Flash-0731`
 - Runtime: oMLX DeepSeek V4 + integrated DSpark/MTP
-- Hosts: two Apple M4 Max systems, 128 GB unified memory each
+- Hosts: two Apple M4 Max systems, 128 GB unified memory each; rank 1 on AC High Power mode
 - Transport: MLX JACCL over direct Thunderbolt RDMA
 - Parallelism: 128 routed experts per rank; trunk/shared experts/DSpark replicated
 - Serving: six prompt slots, six decode slots, dynamic caches
@@ -36,7 +36,7 @@ Matched 256-token counting streams separate TTFT from sustained streamed decode.
 | Verification | Visible decode | Tokens/cycle | Cycles |
 |---|---:|---:|---:|
 | Three positions | 30.75 tok/s | 2.42 | 106 |
-| Five positions with exact rollback | 36.45–37.0 tok/s | 3.76 | 68 |
+| Five positions with exact rollback | 36.45–37.77 tok/s | 3.76 | 68 |
 
 Final per-position acceptance:
 

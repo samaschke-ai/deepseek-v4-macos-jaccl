@@ -3,7 +3,7 @@
   "hardware": {
     "coordinator": "Mac Studio, Apple M4 Max, 128 GB",
     "rank_1": "14-inch MacBook Pro, Apple M4 Max, 128 GB",
-    "rank_1_power": "Apple 96W USB-C adapter, 94W negotiated"
+    "rank_1_power": "Apple 96W USB-C adapter, 94W negotiated, AC High Power mode"
   },
   "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
   "production": {
@@ -53,14 +53,30 @@
       },
       "completion_tokens": 256,
       "cycles": 68,
-      "decode_s": 7.023,
+      "decode_s": 6.777,
       "tokens_per_cycle": 3.76,
-      "visible_tok_s": 36.45
+      "visible_tok_s": 37.77,
+      "verified_range_tok_s": "36.45-37.77"
     }
   },
   "rejected": {
+    "four_position_verify": {
+      "visible_tok_s": 34.88
+    },
+    "full_omlx_v054_ep_stage": {
+      "visible_tok_s": 33.28
+    },
+    "moe_tensor_parallel": {
+      "visible_tok_s": 34.72
+    },
+    "native_gate_up_generic_down_verify": {
+      "visible_tok_s": 28.12
+    },
     "native_moe_for_36_route_verify": {
       "visible_tok_s": 29.88
+    },
+    "partial_omlx_v054_native_graft": {
+      "visible_tok_s": 28.74
     },
     "prefill_step_1024": {
       "prefill_8k_tok_s": 302.31

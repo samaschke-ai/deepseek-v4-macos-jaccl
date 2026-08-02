@@ -22,7 +22,8 @@ are included.
 ## Measured reference system
 
 Two M4 Max Macs with 128 GB unified memory each, connected by direct
-Thunderbolt RDMA. Rank 1 used an Apple 96W USB-C adapter negotiating 94W.
+Thunderbolt RDMA. Rank 1 used an Apple 96W USB-C adapter negotiating 94W and
+macOS AC High Power mode (`powermode 2`).
 
 | Measurement | Result |
 |---|---:|
@@ -30,7 +31,7 @@ Thunderbolt RDMA. Rank 1 used an Apple 96W USB-C adapter negotiating 94W.
 | 8K prefill after EP route masking | 312 tok/s |
 | 32K prefill, final configuration | 287 tok/s |
 | Decode before five-position rollback | 30.75 visible tok/s |
-| Decode after five-position rollback | 36.45–37.0 visible tok/s |
+| Decode after five-position rollback | 36.45–37.77 visible tok/s |
 | DSpark yield after rollback repair | 3.76 tokens/cycle |
 
 See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md),
