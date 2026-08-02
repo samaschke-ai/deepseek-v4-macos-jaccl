@@ -25,6 +25,17 @@ Two M4 Max Macs with 128 GB unified memory each, connected by direct
 Thunderbolt RDMA. Rank 1 used an Apple 96W USB-C adapter negotiating 94W and
 macOS AC High Power mode (`powermode 2`).
 
+### Headline improvement versus original production
+
+| Metric | Original production | Final accepted | Improvement |
+|---|---:|---:|---:|
+| 32K prefill (PP) | 178.24 tok/s | 287.15 tok/s | **+61.1%** |
+| Visible decode (TG) | ~25.4 tok/s | 36.45–37.77 tok/s | **+43–49%** |
+
+The original figures are pre-remediation production measurements. The
+stage-level figures below isolate individual route-mask, power, and rollback
+changes and therefore use different immediate baselines.
+
 | Measurement | Result |
 |---|---:|
 | 8K prefill before EP route masking | 259 tok/s |
