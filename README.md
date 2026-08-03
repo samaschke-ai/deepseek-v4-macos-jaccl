@@ -36,6 +36,20 @@ The original figures are pre-remediation production measurements. The
 stage-level figures below isolate individual route-mask, power, and rollback
 changes and therefore use different immediate baselines.
 
+### Current optimization track
+
+The EP-aware masked small-M MXFP4 QMV candidate raised a matched counting run
+from 36.60 to **40.36 visible tok/s** (+10.3%) while preserving 3.76
+tokens/cycle and the exact five-position acceptance counts. The real-shape
+projection microbenchmark improved from 0.717 to 0.433 ms. The new 20–25% goal
+from the pre-QMV current values remains open (TG target 43.7–47.2 tok/s; 32K PP
+target 344.6–358.9 tok/s).
+
+Implementation and checksum-pinned wheel:
+
+- [`samaschke-ai/omlx` branch `perf/deepseek-masked-small-m-mxfp4-main`](https://github.com/samaschke-ai/omlx/tree/perf/deepseek-masked-small-m-mxfp4-main)
+- [`deepseek-ep-masked-qmv-v1` pre-release](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1)
+
 | Measurement | Result |
 |---|---:|
 | 8K prefill before EP route masking | 259 tok/s |
@@ -72,17 +86,31 @@ Set paths for your editable oMLX checkout:
 OMLX=/path/to/omlx
 PYTHON=/path/to/venv/bin/python
 SWITCH=$OMLX/omlx/patches/deepseek_v4/switch_layers.py
+FAST=$OMLX/omlx/custom_kernels/glm_moe_dsa/fast.py
 CACHE=$OMLX/omlx/patches/deepseek_v4/cache_extras.py
 MTP_MODEL=$OMLX/omlx/patches/mlx_lm_mtp/deepseek_v4_model.py
 MTP_BATCH=$OMLX/omlx/patches/mlx_lm_mtp/batch_generator.py
 
 $PYTHON patches/patch_omlx_native_shape_fallback.py "$SWITCH"
 $PYTHON patches/patch_omlx_ep_route_mask.py "$SWITCH"
+$PYTHON patches/patch_omlx_ep_masked_qmv.py "$FAST" "$SWITCH"
 $PYTHON patches/patch_omlx_pooling_rollback.py "$CACHE" "$MTP_MODEL"
 $PYTHON patches/patch_omlx_mtp_rank_control.py "$MTP_BATCH"
 ```
 
-Every patcher is idempotent and refuses an unexpected source layout.
+Every patcher is idempotent and refuses an unexpected source layout. The
+masked-QMV patch requires the checksum-pinned CPython 3.13 wheel from the
+[`deepseek-ep-masked-qmv-v1`](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1)
+pre-release. Extract its `omlx/custom_kernels/glm_moe_dsa/` artifacts to a
+staging directory, then run:
+
+```bash
+$PYTHON patches/install_native_kernels.py /path/to/staged/glm_moe_dsa \
+  "$OMLX/omlx/custom_kernels/glm_moe_dsa"
+```
+
+The installer verifies each artifact checksum and requires the masked-QMV
+symbol before succeeding.
 
 Run the rollback matrix before deployment:
 

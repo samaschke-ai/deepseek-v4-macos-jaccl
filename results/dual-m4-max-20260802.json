@@ -1,18 +1,5 @@
 {
   "architecture": "EP2 over MLX JACCL RDMA",
-  "headline_improvement": {
-    "prefill_32k": {
-      "baseline_tok_s": 178.24,
-      "final_tok_s": 287.15,
-      "improvement_percent": 61.1
-    },
-    "visible_decode": {
-      "baseline_tok_s": 25.4,
-      "final_range_tok_s": "36.45-37.77",
-      "improvement_range_percent": "43-49"
-    },
-    "provenance": "original pre-remediation production measurements"
-  },
   "hardware": {
     "coordinator": "Mac Studio, Apple M4 Max, 128 GB",
     "rank_1": "14-inch MacBook Pro, Apple M4 Max, 128 GB",
@@ -29,6 +16,11 @@
     "prefill_step_size": 512,
     "shared_experts": "replicated",
     "transport": "JACCL RDMA"
+  },
+  "current_optimization_target": {
+    "prefill_32k_tok_s": "344.6-358.9",
+    "visible_decode_tok_s": "43.7-47.2",
+    "requested_improvement_percent": "20-25"
   },
   "measurements": {
     "prefill_8k_before_route_mask": {
@@ -56,6 +48,20 @@
       "tokens_per_cycle": 2.42,
       "visible_tok_s": 30.75
     },
+    "decode_ep_masked_qmv": {
+      "acceptance": "190/235 (80.9%)",
+      "backbone_ms": "5471-5502",
+      "completion_tokens": 256,
+      "cycles": 68,
+      "tokens_per_cycle": 3.76,
+      "visible_tok_s": 40.36,
+      "matched_immediate_baseline_tok_s": 36.6,
+      "improvement_percent": 10.3,
+      "projection_microbench_ms": {
+        "generic_gather_qmm": 0.7172,
+        "masked_qmv": 0.4332
+      }
+    },
     "decode_five_position_final": {
       "acceptance": {
         "d1": "59/68",
@@ -79,6 +85,14 @@
     "full_omlx_v054_ep_stage": {
       "visible_tok_s": 33.28
     },
+    "fused_masked_gate_up_qmv": {
+      "masked_pair_ms": 0.7101,
+      "two_masked_single_ms": 0.7038
+    },
+    "jaccl_ring_two_rank": {
+      "visible_tok_s": 40.09,
+      "mesh_visible_tok_s": 40.36
+    },
     "moe_tensor_parallel": {
       "visible_tok_s": 34.72
     },
@@ -93,6 +107,14 @@
     },
     "prefill_step_1024": {
       "prefill_8k_tok_s": 302.31
+    },
+    "prefill_step_640": {
+      "prefill_8k_tok_s": 310.18,
+      "matched_512_tok_s": 320.41
+    },
+    "rowwise_mtp_batch": {
+      "visible_tok_s": 40.33,
+      "assessment": "neutral"
     },
     "shared_expert_sharding": {
       "prefill_8k_tok_s": 329.51,

@@ -39,27 +39,30 @@ An uncaught generation-thread failure must make readiness fail or terminate the
 server process. `/v1/models` is metadata health, not generation health.
 Deployment-specific readiness-file removal belongs in the service wrapper.
 
-## 5. Small-M EP-aware MXFP4 verification kernel
+## 5. Small-M EP-aware MXFP4 verification kernel — implemented
 
-This is the remaining performance project. Five-position verification has 36
-routed rows. Generic gathered QMM computes remote routes; the existing native
-block path is slower at this size because planning/launch overhead dominates.
-A useful upstream kernel must:
+Five-position verification has 36 routed rows. Generic gathered QMM computes
+remote routes; the existing native block path is slower at this size because
+sorting and block-plan overhead dominate.
 
-- fuse route compaction/block discovery with gate+up execution;
-- skip remote routes without host synchronization or dynamic shapes;
-- preserve decode-identical reduction order so DSpark acceptance does not fall;
-- support M=2..6 and both BF16/FP16 inputs;
-- benchmark the full target verify, not only isolated GEMM time.
+The implementation is available on:
 
-Measured rejected alternatives:
+- branch: [`samaschke-ai/omlx:perf/deepseek-masked-small-m-mxfp4-main`](https://github.com/samaschke-ai/omlx/tree/perf/deepseek-masked-small-m-mxfp4-main)
+- wheel: [`deepseek-ep-masked-qmv-v1`](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1)
 
-- all-native 36-route verify: 29.88 tok/s;
-- native gate+up with generic down: 28.12 tok/s;
-- MoE-only tensor partitioning: 34.72 tok/s due acceptance drift;
-- four-position verification: 34.88 tok/s;
-- partial/full oMLX v0.5.4 grafts onto this EP2 runtime: 28.74/33.28 tok/s.
+It dispatches MLX's exact MXFP4 QMV reduction over fixed route rows and checks
+the EP ownership mask before loading expert weights. It requires no sorting,
+data-dependent shapes, or host synchronization. Focused FP16/BF16 tests are
+bit-identical to generic QMM and masked rows are exactly zero.
 
-The accepted generic path reaches 36.45–37.77 tok/s with exact five-position
-rollback. Do not upstream a microbenchmark-only change that regresses this
-end-to-end result.
+Measured results:
+
+- real 36-route projection: 0.7172 → 0.4332 ms (1.655×);
+- matched visible decode: 36.60 → 40.36 tok/s (+10.3%);
+- acceptance unchanged at 190/235 (80.9%), 3.76 tokens/cycle;
+- per-depth counts unchanged: 59/68, 45/59, 36/45, 27/36, 23/27.
+
+A fused gate+up variant was correct but slower than two masked calls (0.7101
+versus 0.7038 ms) and was removed in a follow-up commit. Further work should
+focus on replicated trunk/shared-expert cost and collective scheduling rather
+than reintroducing block planning for small M.

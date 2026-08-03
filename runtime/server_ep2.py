@@ -215,6 +215,9 @@ def _expert_shard(self, group=None):
         moe._ep_end = end
         moe._ep_count = count
         moe._ep_group = group
+        # Only EP target modules opt into the masked QMV path; replicated
+        # DSpark/MTP modules retain their stock numerical path.
+        moe.switch_mlp._ep_masked_qmv = True
         for proj in (
             moe.switch_mlp.gate_proj,
             moe.switch_mlp.up_proj,

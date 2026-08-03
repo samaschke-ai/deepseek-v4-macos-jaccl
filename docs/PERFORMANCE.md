@@ -48,6 +48,12 @@ Matched 256-token counting streams separate TTFT from sustained streamed decode.
 |---|---:|---:|---:|
 | Three positions | 30.75 tok/s | 2.42 | 106 |
 | Five positions with exact rollback | 36.45–37.77 tok/s | 3.76 | 68 |
+| Five positions plus EP masked QMV | 40.36 tok/s | 3.76 | 68 |
+
+The masked QMV result uses an immediate matched baseline of 36.60 tok/s, for a
+10.3% gain. Target-backbone telemetry fell from approximately 6.13 seconds to
+5.47–5.50 seconds per 256-token run. Acceptance remained 190/235 (80.9%). The
+new 20–25% target remains in progress rather than being claimed here.
 
 Final per-position acceptance:
 
@@ -69,8 +75,13 @@ model decode bandwidth.
 | Experiment | Result | Decision |
 |---|---:|---|
 | Prefill step 1,024 after EP fix | 302.31 tok/s at 8K | Retain 512 |
+| Prefill step 640 | 310.18 tok/s versus 320.41 at 512 | Reject |
 | Shared-expert tensor sharding | 329.51 tok/s prefill; 23.46 tok/s decode | Reject |
+| Shape-gated shared-expert sharding | 325.8 tok/s prefill; 32.0 tok/s decode | Reject |
 | Native block kernel for 36-route verify | 29.88 tok/s decode | Reject |
+| Fused masked gate+up QMV | 0.7101 ms versus 0.7038 ms for two calls | Reject |
+| Two-rank JACCL ring | 40.09 tok/s versus 40.36 mesh | Retain mesh |
+| Rowwise MTP batching | 40.33 tok/s | Neutral; do not persist |
 
 ## Comparison boundary
 
