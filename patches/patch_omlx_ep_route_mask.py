@@ -84,6 +84,7 @@ PATCHES = (
     (
         """        original_dtype = x.dtype
 
+        do_sort = indices.size >= 64
         idx = indices
         inv_order = None
         if do_sort:
@@ -91,6 +92,7 @@ PATCHES = (
 """,
         """        original_dtype = x.dtype
 
+        do_sort = indices.size >= 64
         idx = indices
         inv_order = None
         route_mask = scores != 0 if scores is not None else None
@@ -101,6 +103,10 @@ PATCHES = (
                 x, idx, inv_order, route_mask = _gather_sort(
                     x, indices, route_mask
                 )
+""",
+        """        route_mask = scores != 0 if scores is not None else None
+        if do_sort:
+            if route_mask is None:
 """,
     ),
     (
@@ -127,8 +133,8 @@ def main() -> None:
     path = Path(sys.argv[1]).resolve()
     source = path.read_text()
     changed = False
-    for old, new in PATCHES:
-        if new in source:
+    for old, new, *present_markers in PATCHES:
+        if new in source or any(marker in source for marker in present_markers):
             continue
         if source.count(old) != 1:
             raise SystemExit(

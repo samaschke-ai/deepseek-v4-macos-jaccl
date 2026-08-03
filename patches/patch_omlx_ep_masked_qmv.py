@@ -52,7 +52,7 @@ def deepseek_mxfp4_gather_qmm_expert(
 
 SWITCH_PATCHES = (
     (
-        "def _should_sort_experts(x: mx.array, indices: mx.array) -> bool:\n",
+        "@lru_cache(maxsize=None)\ndef _mxfp4_block_builder",
         '''def _masked_ep_qmv(proj, x, indices, route_mask):
     flat_x = x.flatten(0, -3)
     flat_indices = indices.flatten().astype(mx.int32)
@@ -68,19 +68,13 @@ SWITCH_PATCHES = (
     return out.reshape(*indices.shape, 1, proj.output_dims)
 
 
-def _should_sort_experts(x: mx.array, indices: mx.array) -> bool:
-''',
+@lru_cache(maxsize=None)
+def _mxfp4_block_builder''',
+        "def _masked_ep_qmv(",
     ),
     (
-        '''        block_plan = None
-        native_kinds = None
-        use_f16_affine_moe = False
-        projections = (self.up_proj, self.gate_proj, self.down_proj)
-''',
-        '''        block_plan = None
-        native_kinds = None
-        use_f16_affine_moe = False
-        projections = (self.up_proj, self.gate_proj, self.down_proj)
+        "        projections = (self.up_proj, self.gate_proj, self.down_proj)\n",
+        '''        projections = (self.up_proj, self.gate_proj, self.down_proj)
         use_masked_ep_qmv = (
             not do_sort
             and route_mask is not None
@@ -111,18 +105,14 @@ def _should_sort_experts(x: mx.array, indices: mx.array) -> bool:
 ''',
     ),
     (
-        '''        if getattr(self.down_proj, "_tp_fp32_partial", False):
-            x = x.astype(mx.float32)
-        x = self.down_proj(
+        '''        x = self.down_proj(
             x,
             idx,
             sorted_indices=do_sort,
             block_plan=block_plan,
         )
 ''',
-        '''        if getattr(self.down_proj, "_tp_fp32_partial", False):
-            x = x.astype(mx.float32)
-        if use_masked_ep_qmv:
+        '''        if use_masked_ep_qmv:
             x = _masked_ep_qmv(self.down_proj, x, idx, route_mask)
         else:
             x = self.down_proj(
@@ -139,8 +129,8 @@ def _should_sort_experts(x: mx.array, indices: mx.array) -> bool:
 def apply(path: Path, patches: tuple[tuple[str, str], ...]) -> str:
     text = path.read_text()
     changed = False
-    for old, new in patches:
-        if new in text:
+    for old, new, *present_markers in patches:
+        if new in text or any(marker in text for marker in present_markers):
             continue
         if text.count(old) != 1:
             raise SystemExit(

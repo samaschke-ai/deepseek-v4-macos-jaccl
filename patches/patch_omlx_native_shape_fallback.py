@@ -161,6 +161,7 @@ PATCHES = (
                 x_up = self.up_proj(x, idx, sorted_indices=False)
                 x_gate = self.gate_proj(x, idx, sorted_indices=False)
 """,
+        "Cancellation and ragged-prefill compaction can produce route",
     ),
 )
 
@@ -171,8 +172,8 @@ def main() -> None:
     path = Path(sys.argv[1]).resolve()
     source = path.read_text()
     changed = False
-    for old, new in PATCHES:
-        if new in source:
+    for old, new, *present_markers in PATCHES:
+        if new in source or any(marker in source for marker in present_markers):
             continue
         if source.count(old) != 1:
             raise SystemExit(f"refusing unexpected oMLX source near: {old.splitlines()[0]!r}")
