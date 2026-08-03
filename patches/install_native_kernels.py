@@ -11,14 +11,15 @@ import sys
 from pathlib import Path
 
 ARTIFACTS = {
-    "_ext.cpython-313-darwin.so": ("791738fb2d3a648cb123e86155fb29fe5c9a6631cbc8bfb76a11eb1a42bb6608", 0o755),
-    "libomlx_glm_kernel_ops.dylib": ("e75ca7c7d2db504a2eb09add81239f1b15fb0c33d2e94320fe11a47d5527c36f", 0o755),
-    "omlx_glm_kernels.metallib": ("ae3f15b73f834e3cddae48cc12d065a3b5ba8b21fdcc95dadd8012cc4486fd52", 0o644),
+    "_ext.cpython-313-darwin.so": ("96aa33b0cdfc3581e90dffa3523c6a77a5d819753dea3b0cb6b69e6a95997071", 0o755),
+    "libomlx_glm_kernel_ops.dylib": ("2562c260ef61c3803f808a4a6d8b18a4f7e5c833990060de962804109957bf30", 0o755),
+    "omlx_glm_kernels.metallib": ("3a0d9d48362a6552956c9d28b1a551b879a378dbba9f3f0e945fc56c41161351", 0o644),
 }
 REQUIRED = (
     "deepseek_mxfp4_gather_qmm_blocks",
     "deepseek_mxfp4_gather_qmm_pair_blocks",
     "deepseek_mxfp4_gather_qmm_pair_concat_blocks",
+    "deepseek_mxfp4_gather_qmm_masked_row",
     "deepseek_v4_sparse_attention",
 )
 
