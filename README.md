@@ -1,129 +1,115 @@
-# DeepSeek V4 Flash on two Macs with oMLX + JACCL
+# DeepSeek V4 Flash on two Apple Silicon Macs
 
-A reproducible integration recipe for serving the official
-`deepseek-ai/DeepSeek-V4-Flash-0731` checkpoint across two Apple Silicon Macs
-with oMLX, expert parallelism, MLX JACCL, and integrated DSpark/MTP.
+Serve the official `deepseek-ai/DeepSeek-V4-Flash-0731` checkpoint across two
+Apple Silicon Macs with oMLX, expert parallelism, MLX JACCL, and DSpark/MTP.
 
-This repository contains patches, launch examples, tests, and measurements. It
-does **not** contain model weights, credentials, or a turnkey installer.
+This repository provides the integration patches, launch examples, API router,
+tests, and measurement receipts. Model weights are not included.
 
-## Current truth
+[Quick start](#quick-start) · [Measurements](#measurements) ·
+[Configuration](#configuration) · [Documentation](#documentation)
 
-The deployed reference is canonical EP2: 128 routed experts on each rank,
-replicated trunk/shared experts/DSpark, JACCL collectives, five-position
-DSpark/MTP, six prompt slots, six decode slots, dynamic caches, and the full
-1,048,576-token context ceiling.
+## What it provides
 
-The active performance objective is **at least 100 visible tok/s for one warmed
-request**. Aggregate concurrency throughput is a separate measurement.
+- Expert-parallel inference with 128 routed experts on each rank.
+- JACCL collectives over a direct Thunderbolt RDMA link.
+- Replicated trunk, shared experts, and DSpark/MTP control.
+- Five-position speculative verification with dynamic prompt and decode caches.
+- Six prompt slots, six decode slots, and the checkpoint's full context limit.
+- OpenAI-compatible streaming and DSML tool-call conversion.
+- Checksum-checked native kernel installation and rollback tests.
 
-### Current exact `count300` baseline
+## Reference system
 
-| Metric | Canonical EP2 result |
+The published measurements used two M4 Max Macs with 128 GB unified memory
+each and direct Thunderbolt RDMA. The reference serving configuration used:
+
+- official DeepSeek V4 Flash 0731 weights;
+- MLX `0.32.0`;
+- Python 3.13;
+- six prompt slots and six decode slots;
+- 512-token prefill steps;
+- a 1,048,576-token API context ceiling.
+
+## Measurements
+
+### Exact `count300` workload — 2026-08-05
+
+| Metric | Measurement |
 |---|---:|
 | Visible decode, three matched repeats | **60.88 tok/s median** |
 | Best visible decode repeat | **61.21 tok/s** |
-| Measured median cycle latency | **95.99 ms** |
+| Median cycle latency | **95.99 ms** |
 | Speculative yield | **5.84 tokens/cycle** |
-| DSpark acceptance | **527/535 (98.5%)** |
-| Output and rank control | identical |
+| Verification acceptance | **527/535 (98.5%)** |
 
-At 5.84 tokens/cycle, 100 tok/s requires approximately **58.4 ms/cycle**.
-The canonical runtime remains below that gate; this repository does not claim
-100 tok/s has been reached.
+The workload uses one warm-up and three matched repeats. Stream accounting
+includes reasoning and content deltas separately. See the machine-readable
+[measurement receipt](results/deepseek-100tps-phase-20260805.json).
 
-The measurement uses the exact DGX-compatible `count300` prompt, one warm-up,
-three matched repeats, no `seed` parameter, and a parser that includes both
-`delta.reasoning`/`delta.reasoning_content` and `delta.content`.
+### Additional published measurements
 
-### Latest candidate decisions
+These measurements use different workloads or stages and are not one combined
+before/after series:
 
-Two correctness-first attention layouts were tested and not promoted:
+| Workload or stage | Result |
+|---|---:|
+| 32K prefill | **287.15 tok/s** |
+| Five-position rollback decode | **36.45–37.77 tok/s** |
+| Masked small-M MXFP4 QMV workload | **40.36 tok/s** |
+| DSpark speculative yield after rollback repair | **3.76 tokens/cycle** |
 
-- **Post-attention head gather:** exact through eight layers across attention
-  compression ratios 0, 4, and 128, but diverged after layer 9 attention at
-  full depth. Rejected for exactness.
-- **Pre-attention Q gather:** bit-identical through all 43 layers, including
-  final hidden state and logits, but measured 57.17 tok/s median because one
-  additional collective per layer cost more than the saved projection work.
-  Rejected for performance.
+More methodology and receipts are in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-No candidate was deployed. Full details are in
-[`results/deepseek-100tps-phase-20260805.json`](results/deepseek-100tps-phase-20260805.json).
+## Requirements
 
-## What is accepted in the reference recipe
+- Two Apple Silicon Macs with sufficient unified memory for the checkpoint and
+  EP2 placement.
+- Matching macOS, Python, MLX, oMLX, and native artifacts on both ranks.
+- A direct Thunderbolt network with active RDMA devices.
+- The official DeepSeek V4 Flash 0731 checkpoint on both ranks.
+- Full Xcode/Metal tooling when building native artifacts from source.
+- An authenticated, private rank-0 API endpoint for serving clients.
 
-- Official DeepSeek V4 Flash 0731 checkpoint lineage.
-- EP2 with routed experts split 128/128; trunk, shared experts, and DSpark
-  replicated.
-- MLX JACCL over direct Thunderbolt RDMA. Do not silently substitute TCP model
-  collectives for production validation.
-- Five-position DSpark/MTP with exact pooling-cache rollback and rank-0
-  speculative control.
-- Native EP route masking and the accepted masked small-M MXFP4 QMV path.
-- Six prompt slots, six decode slots, dynamic caches, and full context.
-- SSE streaming, disconnect draining, readiness handling, and OpenAI-compatible
-  DSML tool conversion.
+The model-control socket is separate from JACCL: it carries rank-0 speculative
+control decisions only. Model tensors and model collectives remain on JACCL.
 
 ## Quick start
 
-### 1. Prepare both ranks
+The commands below assume the oMLX checkout, this repository, and the model
+exist at the same absolute paths on both Macs. Run setup and patch commands on
+both ranks.
 
-Install matching macOS, Python, MLX, oMLX, native kernel artifacts, and the
-same official checkpoint on both Macs. The compact launcher below requires the
-oMLX checkout, this integration repository, and the checkpoint to exist at
-identical absolute paths on both ranks. If your paths differ, adapt the launcher
-and per-rank environment instead of using these commands unchanged.
-
-Export the same values in the setup shell on **each** rank, including the
-launch machine. These exports are for the setup commands; section 3 configures
-the environment inherited by the SSH-launched processes.
+### 1. Set paths
 
 ```bash
-export OMLX=/same/path/on/both-ranks/omlx-checkout
-export REPO=/same/path/on/both-ranks/deepseek-v4-macos-jaccl
+export OMLX=/same/path/on-both-ranks/omlx
+export REPO=/same/path/on-both-ranks/deepseek-v4-macos-jaccl
+export MODEL=/same/path/on-both-ranks/DeepSeek-V4-Flash-0731
 export PYTHON=$OMLX/venv/bin/python
-export MODEL=/same/path/on/both-ranks/DeepSeek-V4-Flash-0731
 ```
 
-Before continuing, run this preflight on both ranks:
+Use these tested source pins:
 
-```bash
-test -x "$PYTHON"
-test -d "$MODEL"
-test -f "$REPO/runtime/server_ep2.py"
-test -x "$REPO/examples/run-rank-server.sh"
-```
-
-The checkpoint must be the official 0731 lineage. Do not point the server at a
-second copy under another path: that can load a second model and exhaust
-unified memory.
-
-Use the tested source and ABI pins on both ranks:
-
-- oMLX commit [`e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f`](https://github.com/samaschke-ai/omlx/commit/e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f)
-  (tag `deepseek-ep-masked-qmv-v1`);
+- oMLX commit [`e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f`](https://github.com/samaschke-ai/omlx/commit/e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f);
 - MLX `0.32.0`;
 - mlx-lm commit `ab1806e8f5d6aa035973af194a1b9198ab4754dc`;
-- CPython 3.13 for the published `cp313` native extension.
+- CPython 3.13.
 
-Verify the checkout and environment before patching:
+Check the paths and versions on both ranks before patching:
 
 ```bash
+test -x "$PYTHON" && test -d "$MODEL" && test -f "$REPO/runtime/server_ep2.py"
 test "$(git -C "$OMLX" rev-parse HEAD)" = \
   "e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f"
-test "$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = \
-  "3.13"
+test "$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.13"
 test "$("$PYTHON" -c 'import mlx; print(mlx.__version__)')" = "0.32.0"
 "$PYTHON" -m pip freeze | grep -F \
   'mlx-lm @ git+https://github.com/ml-explore/mlx-lm@ab1806e8f5d6aa035973af194a1b9198ab4754dc'
 ```
 
-### 2. Apply the patches in order on both ranks
-
-Run this entire section separately on **each** rank. Identical absolute paths do
-not imply a shared filesystem. The patchers are idempotent and refuse
-unexpected source layouts.
+### 2. Apply the integration patches
 
 ```bash
 SWITCH=$OMLX/omlx/patches/deepseek_v4/switch_layers.py
@@ -139,63 +125,48 @@ $PYTHON "$REPO/patches/patch_omlx_pooling_rollback.py" "$CACHE" "$MTP_MODEL"
 $PYTHON "$REPO/patches/patch_omlx_mtp_rank_control.py" "$MTP_BATCH"
 ```
 
-Install the checksum-pinned native artifacts on each rank before enabling
-masked QMV. Use
-`omlx-0.5.4-cp313-cp313-macosx_15_0_universal2.whl` from the
-[`deepseek-ep-masked-qmv-v1` oMLX release](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1),
-whose SHA-256 is
+Download `omlx-0.5.4-cp313-cp313-macosx_15_0_universal2.whl` from the
+[`deepseek-ep-masked-qmv-v1` oMLX release](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1).
+Its SHA-256 is
 `359858e91989e0ac6a8ff7551a4475b710c125a0f74a4c4e13586284dc1319c4`.
-The installer independently verifies every extracted artifact checksum.
+Verify the download, extract the `glm_moe_dsa` artifacts, and run the installer
+on both ranks:
 
 ```bash
+echo '359858e91989e0ac6a8ff7551a4475b710c125a0f74a4c4e13586284dc1319c4  /path/to/omlx-0.5.4-cp313-cp313-macosx_15_0_universal2.whl' | shasum -a 256 -c -
 $PYTHON "$REPO/patches/install_native_kernels.py" \
   /path/to/staged/glm_moe_dsa \
   "$OMLX/omlx/custom_kernels/glm_moe_dsa"
-```
 
-Run the rollback test on each rank, then compare the `shasum` output between
-ranks before starting distributed serving:
-
-```bash
 $PYTHON "$REPO/tests/test_pooling_rollback.py" "$CACHE"
-shasum "$FAST" "$SWITCH" "$CACHE" "$MTP_MODEL" "$MTP_BATCH" \
-  "$REPO/runtime/server_ep2.py"
 ```
 
-### 3. Configure the sanitized JACCL hostfile
+### 3. Configure JACCL
 
-Copy [`examples/hosts-jaccl.json`](examples/hosts-jaccl.json) and replace its
-placeholder SSH hostnames, direct-link addresses, and RDMA device names with
-the values for your two Macs. Keep the JACCL backend and ensure both ranks use
-the same model/runtime sources.
+Copy [`examples/hosts-jaccl.json`](examples/hosts-jaccl.json) and replace the
+`.example.invalid` hostnames, RDMA addresses, and device names with the values
+for your two Macs. Do not use the placeholders unchanged.
 
-Add the common absolute launch paths to the hostfile's `envs` array so every
-new SSH process receives them; exports from an earlier remote shell do not
-persist into `mlx.launch`:
+Set these environment variables in the hostfile for the launched ranks:
 
-```json
-{
-  "envs": [
-    "OMLX_MTP_ENABLED=1",
-    "OMLX_MTP_DRAFT_TOKENS=5",
-    "OMLX_MTP_ROWWISE_BATCH=0",
-    "DSV4_CONTROL_HOST=10.0.0.1",
-    "DSV4_CONTROL_PORT=29650",
-    "DSV4_READY_FILE=/tmp/deepseek-v4/ready",
-    "DSV4_WORK=/same/path/on/both-ranks/omlx-checkout",
-    "DSV4_MODEL=/same/path/on/both-ranks/DeepSeek-V4-Flash-0731",
-    "DSV4_SERVER_EP=/same/path/on/both-ranks/deepseek-v4-macos-jaccl/runtime/server_ep2.py"
-  ]
-}
+```text
+OMLX_MTP_ENABLED=1
+OMLX_MTP_DRAFT_TOKENS=5
+OMLX_MTP_ROWWISE_BATCH=0
+DSV4_CONTROL_HOST=<rank-0-direct-address>
+DSV4_CONTROL_PORT=<private-control-port>
+DSV4_READY_FILE=/tmp/deepseek-v4/ready
+DSV4_WORK=<oMLX-path>
+DSV4_MODEL=<checkpoint-path>
+DSV4_SERVER_EP=<repository-path>/runtime/server_ep2.py
 ```
 
-The separate rank-control socket is only for rank-0-authoritative speculative
-control. Model tensors and model collectives must remain on JACCL.
+Keep `backend` set to `jaccl`. The example hostfile documents the required
+shape and fields without containing a usable network topology.
 
-### 4. Launch and verify
+### 4. Launch
 
-With `OMLX` and `REPO` set on the launch machine and the three `DSV4_*` paths
-in the hostfile, launch [`examples/run-rank-server.sh`](examples/run-rank-server.sh):
+From the rank-0 setup shell:
 
 ```bash
 $OMLX/venv/bin/mlx.launch --verbose \
@@ -205,70 +176,61 @@ $OMLX/venv/bin/mlx.launch --verbose \
   "$REPO/examples/run-rank-server.sh"
 ```
 
-The hostfile supplies the rank-specific SSH/RDMA topology; the rank launcher
-supplies the six-slot serving flags. Publish only the rank-0 API endpoint.
+Publish only the rank-0 API endpoint. Check readiness and the model list before
+sending client traffic:
 
-Before benchmarking, verify:
+```bash
+export BASE_URL=https://<rank-0-api-host>/v1
+curl -fsS "$BASE_URL/models"
+```
 
-1. both ranks report active RDMA devices;
-2. both ranks pass the checkpoint and native-artifact checksums;
-3. the readiness file appears only after model warm-up;
-4. `/v1/models` reports the expected public model;
-5. no stale EXO, llama.cpp, distributed-smoke, or old benchmark process exists.
+A minimal streaming request is:
 
-## Benchmarking correctly
+```bash
+curl -N "$BASE_URL/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "Explain JACCL in one sentence."}],
+    "stream": true,
+    "max_tokens": 64
+  }'
+```
 
-Use identical clean restart, warm-up, request ordering, and output-hash checks
-for every candidate. Long DSpark runs are invalid without MTP telemetry. Do not
-send `seed=1` in this path: it can silently disable MTP activation.
+## Benchmarking
 
-The canonical `count300` result is the primary predictable-workload comparison.
-For public API testing, also exercise ordinary generation, reasoning, JSON, and
-OpenAI tool calls. Parse streamed reasoning and content separately when doing
-application-level accounting.
+The repository includes a small OpenAI-compatible streaming benchmark:
 
-## Historical accepted results
+```bash
+$PYTHON "$REPO/scripts/benchmark_openai.py" \
+  --base-url "$BASE_URL" \
+  --model deepseek-v4-flash
+```
 
-These are useful milestones from earlier matched workloads, not substitutes for
-the current `count300` baseline above:
+For comparable measurements, keep the model, prompt, warm-up, request ordering,
+and stream accounting constant. Exercise ordinary generation, reasoning, JSON,
+and tool calls separately. Do not publish credentials, host addresses, or local
+filesystem paths in measurement receipts.
 
-| Workload or stage | Result |
-|---|---:|
-| 32K prefill after accepted EP/power remediation | 287.15 tok/s |
-| Five-position rollback decode | 36.45–37.77 tok/s |
-| Masked small-M MXFP4 QMV matched run | 40.36 tok/s |
-| DSpark yield after rollback repair | 3.76 tokens/cycle |
+## Configuration and source map
 
-The old 36–40 tok/s figures used a different short counting workload and
-measurement stage. They must not be presented as the current `count300`
-throughput or as evidence that the 100 tok/s objective has been reached.
+- [`examples/hosts-jaccl.json`](examples/hosts-jaccl.json) — sanitized JACCL
+  topology shape.
+- [`examples/run-rank-server.sh`](examples/run-rank-server.sh) — serving
+  defaults and six-slot launch parameters.
+- [`runtime/server_ep2.py`](runtime/server_ep2.py) — EP2 server integration.
+- [`runtime/openai_router.py`](runtime/openai_router.py) — optional API router.
+- [`patches/`](patches/) — idempotent source and native-artifact patchers.
+- [`tests/`](tests/) — rollback and API tests.
+- [`results/`](results/) — machine-readable measurements.
 
-## Known rejected approaches
+## Documentation
 
-- Generic `mx.compile` around routed EP-MoE: transient gains changed output or
-  degraded under sustained graph/cache growth.
-- Shared-expert tensor sharding: prefill gains did not survive decode.
-- Native block kernels for the six-row/36-route verification shape: decode
-  regressed.
-- Current EXO and llama.cpp RPC paths: incorrect placement/output or
-  insufficient memory on this topology.
-- Post-attention head gathering: full-depth numerical drift.
-- Pre-attention Q gathering: exact but slower due to per-layer collectives.
-- TCP fallback for production model collectives.
-
-## Documentation map
-
-- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — methodology, historical
-  measurements, and current phase checkpoint.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — EP2, DSpark, cache, and
-  transport design.
-- [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md) — MXFP4/MXFP8 boundaries and
-  numerical constraints.
-- [`docs/UPSTREAM.md`](docs/UPSTREAM.md) — upstream candidates and provenance.
-- [`results/`](results/) — machine-readable benchmark receipts.
-- [`patches/`](patches/) — source patchers.
-- [`runtime/`](runtime/) — sanitized server/router examples.
-- [`tests/`](tests/) — rollback, router, and integration checks.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — placement, collectives, and
+  runtime design.
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — measurement methodology.
+- [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md) — quantization boundaries.
+- [`docs/UPSTREAM.md`](docs/UPSTREAM.md) — upstream provenance.
 
 ## License and checkpoint terms
 
