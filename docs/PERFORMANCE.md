@@ -73,8 +73,9 @@ Matched 256-token counting streams separate TTFT from sustained streamed decode.
 
 The masked QMV result uses an immediate matched baseline of 36.60 tok/s, for a
 10.3% gain. Target-backbone telemetry fell from approximately 6.13 seconds to
-5.47–5.50 seconds per 256-token run. Acceptance remained 190/235 (80.9%). The
-new 20–25% target remains in progress rather than being claimed here.
+5.47–5.50 seconds per 256-token run. Acceptance remained 190/235 (80.9%). That
+20–25% target was an intermediate milestone; the active objective is now the
+single-request 100 tok/s gate described above.
 
 Final per-position acceptance:
 

@@ -59,8 +59,9 @@ remains the reference; no candidate was deployed. Full details are in
 The EP-aware masked small-M MXFP4 QMV candidate raised a matched counting run
 from 36.60 to **40.36 visible tok/s** (+10.3%) while preserving 3.76
 tokens/cycle and the exact five-position acceptance counts. The real-shape
-projection microbenchmark improved from 0.717 to 0.433 ms. That 20–25% target was an intermediate milestone; the active objective is
-now the single-request 100 tok/s gate described above.
+projection microbenchmark improved from 0.717 to 0.433 ms. That 20–25% target
+was an intermediate milestone; the active objective is now the single-request
+100 tok/s gate described above.
 
 Implementation and checksum-pinned wheel:
 
