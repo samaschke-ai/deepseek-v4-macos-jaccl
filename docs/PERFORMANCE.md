@@ -22,6 +22,27 @@ These original figures predate the remediation stages below. Stage-level rows
 use their immediate experiment baselines and should not be substituted for the
 full production-to-production comparison.
 
+## 100 tok/s phase checkpoint (2026-08-05)
+
+The active target is at least 100 visible tok/s for one warmed request. The
+exact DGX `count300` workload produced 637 completion tokens over 109 cycles,
+with 5.84 tokens/cycle, 527/535 accepted speculative tokens (98.5%), and
+rank-identical control decisions.
+
+| Configuration | Median visible decode | Median cycle | Decision |
+|---|---:|---:|---|
+| Canonical EP2, three matched repeats | **60.88 tok/s** | **95.99 ms** | Current reference |
+| Pre-attention Q gather, exact through 43 layers | 57.17 tok/s | 102.22 ms | Reject: collective overhead |
+
+At the measured 5.84-token yield, 100 tok/s requires approximately 58.4 ms per
+cycle. The pre-attention Q-gather candidate was numerically exact through all
+43 layers, but its additional collective per layer outweighed the saved Q
+projection work. A post-attention head-gather candidate was exact through eight
+layers across compression ratios 0, 4, and 128, then diverged after layer 9
+attention and was rejected for correctness. Neither candidate was deployed.
+See [`results/deepseek-100tps-phase-20260805.json`](../results/deepseek-100tps-phase-20260805.json)
+for the machine-readable receipt.
+
 ## Prefill
 
 The benchmark prompt repeats `benchmark context datum` with a unique nonce to
