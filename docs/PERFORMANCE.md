@@ -11,16 +11,17 @@
 - Prefill step: 512 tokens
 - API ceiling: 1,048,576 tokens
 
-## Headline result versus original production
+## Historical accepted remediation results
 
 | Metric | Original production | Final accepted | Improvement |
 |---|---:|---:|---:|
 | 32K prefill | 178.24 tok/s | 287.15 tok/s | **+61.1%** |
 | Visible decode | ~25.4 tok/s | 36.45–37.77 tok/s | **+43–49%** |
 
-These original figures predate the remediation stages below. Stage-level rows
-use their immediate experiment baselines and should not be substituted for the
-full production-to-production comparison.
+These are historical production-to-production remediation results from an
+earlier measurement stage. They remain useful for understanding the accepted
+recipe, but they are not the current exact `count300` decode baseline; use the
+100 tok/s phase checkpoint below for current predictable-workload performance.
 
 ## 100 tok/s phase checkpoint (2026-08-05)
 
