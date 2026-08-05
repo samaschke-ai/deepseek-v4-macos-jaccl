@@ -23,7 +23,7 @@ request**. Aggregate concurrency throughput is a separate measurement.
 |---|---:|
 | Visible decode, three matched repeats | **60.88 tok/s median** |
 | Best visible decode repeat | **61.21 tok/s** |
-| Median target cycle | **95.99 ms** |
+| Measured median cycle latency | **95.99 ms** |
 | Speculative yield | **5.84 tokens/cycle** |
 | DSpark acceptance | **527/535 (98.5%)** |
 | Output and rank control | identical |
@@ -70,22 +70,60 @@ No candidate was deployed. Full details are in
 ### 1. Prepare both ranks
 
 Install matching macOS, Python, MLX, oMLX, native kernel artifacts, and the
-same official checkpoint on both Macs. Set these variables independently on
-each rank:
+same official checkpoint on both Macs. The compact launcher below requires the
+oMLX checkout, this integration repository, and the checkpoint to exist at
+identical absolute paths on both ranks. If your paths differ, adapt the launcher
+and per-rank environment instead of using these commands unchanged.
+
+Export the same values in the setup shell on **each** rank, including the
+launch machine. These exports are for the setup commands; section 3 configures
+the environment inherited by the SSH-launched processes.
 
 ```bash
-export OMLX=/path/to/your/omlx-checkout
+export OMLX=/same/path/on/both-ranks/omlx-checkout
+export REPO=/same/path/on/both-ranks/deepseek-v4-macos-jaccl
 export PYTHON=$OMLX/venv/bin/python
-export MODEL=/path/to/DeepSeek-V4-Flash-0731
+export MODEL=/same/path/on/both-ranks/DeepSeek-V4-Flash-0731
+```
+
+Before continuing, run this preflight on both ranks:
+
+```bash
+test -x "$PYTHON"
+test -d "$MODEL"
+test -f "$REPO/runtime/server_ep2.py"
+test -x "$REPO/examples/run-rank-server.sh"
 ```
 
 The checkpoint must be the official 0731 lineage. Do not point the server at a
 second copy under another path: that can load a second model and exhaust
 unified memory.
 
-### 2. Apply the patches in order
+Use the tested source and ABI pins on both ranks:
 
-The patchers are idempotent and refuse unexpected source layouts.
+- oMLX commit [`e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f`](https://github.com/samaschke-ai/omlx/commit/e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f)
+  (tag `deepseek-ep-masked-qmv-v1`);
+- MLX `0.32.0`;
+- mlx-lm commit `ab1806e8f5d6aa035973af194a1b9198ab4754dc`;
+- CPython 3.13 for the published `cp313` native extension.
+
+Verify the checkout and environment before patching:
+
+```bash
+test "$(git -C "$OMLX" rev-parse HEAD)" = \
+  "e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f"
+test "$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = \
+  "3.13"
+test "$("$PYTHON" -c 'import mlx; print(mlx.__version__)')" = "0.32.0"
+"$PYTHON" -m pip freeze | grep -F \
+  'mlx-lm @ git+https://github.com/ml-explore/mlx-lm@ab1806e8f5d6aa035973af194a1b9198ab4754dc'
+```
+
+### 2. Apply the patches in order on both ranks
+
+Run this entire section separately on **each** rank. Identical absolute paths do
+not imply a shared filesystem. The patchers are idempotent and refuse
+unexpected source layouts.
 
 ```bash
 SWITCH=$OMLX/omlx/patches/deepseek_v4/switch_layers.py
@@ -94,26 +132,34 @@ CACHE=$OMLX/omlx/patches/deepseek_v4/cache_extras.py
 MTP_MODEL=$OMLX/omlx/patches/mlx_lm_mtp/deepseek_v4_model.py
 MTP_BATCH=$OMLX/omlx/patches/mlx_lm_mtp/batch_generator.py
 
-$PYTHON patches/patch_omlx_native_shape_fallback.py "$SWITCH"
-$PYTHON patches/patch_omlx_ep_route_mask.py "$SWITCH"
-$PYTHON patches/patch_omlx_ep_masked_qmv.py "$FAST" "$SWITCH"
-$PYTHON patches/patch_omlx_pooling_rollback.py "$CACHE" "$MTP_MODEL"
-$PYTHON patches/patch_omlx_mtp_rank_control.py "$MTP_BATCH"
+$PYTHON "$REPO/patches/patch_omlx_native_shape_fallback.py" "$SWITCH"
+$PYTHON "$REPO/patches/patch_omlx_ep_route_mask.py" "$SWITCH"
+$PYTHON "$REPO/patches/patch_omlx_ep_masked_qmv.py" "$FAST" "$SWITCH"
+$PYTHON "$REPO/patches/patch_omlx_pooling_rollback.py" "$CACHE" "$MTP_MODEL"
+$PYTHON "$REPO/patches/patch_omlx_mtp_rank_control.py" "$MTP_BATCH"
 ```
 
-Install the checksum-pinned native artifacts before enabling masked QMV.
-The published artifact is linked from the
-[`deepseek-ep-masked-qmv-v1` oMLX release](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1).
+Install the checksum-pinned native artifacts on each rank before enabling
+masked QMV. Use
+`omlx-0.5.4-cp313-cp313-macosx_15_0_universal2.whl` from the
+[`deepseek-ep-masked-qmv-v1` oMLX release](https://github.com/samaschke-ai/omlx/releases/tag/deepseek-ep-masked-qmv-v1),
+whose SHA-256 is
+`359858e91989e0ac6a8ff7551a4475b710c125a0f74a4c4e13586284dc1319c4`.
+The installer independently verifies every extracted artifact checksum.
 
 ```bash
-$PYTHON patches/install_native_kernels.py /path/to/staged/glm_moe_dsa \
+$PYTHON "$REPO/patches/install_native_kernels.py" \
+  /path/to/staged/glm_moe_dsa \
   "$OMLX/omlx/custom_kernels/glm_moe_dsa"
 ```
 
-Run the rollback test before starting distributed serving:
+Run the rollback test on each rank, then compare the `shasum` output between
+ranks before starting distributed serving:
 
 ```bash
-$PYTHON tests/test_pooling_rollback.py "$CACHE"
+$PYTHON "$REPO/tests/test_pooling_rollback.py" "$CACHE"
+shasum "$FAST" "$SWITCH" "$CACHE" "$MTP_MODEL" "$MTP_BATCH" \
+  "$REPO/runtime/server_ep2.py"
 ```
 
 ### 3. Configure the sanitized JACCL hostfile
@@ -123,25 +169,40 @@ placeholder SSH hostnames, direct-link addresses, and RDMA device names with
 the values for your two Macs. Keep the JACCL backend and ensure both ranks use
 the same model/runtime sources.
 
+Add the common absolute launch paths to the hostfile's `envs` array so every
+new SSH process receives them; exports from an earlier remote shell do not
+persist into `mlx.launch`:
+
+```json
+{
+  "envs": [
+    "OMLX_MTP_ENABLED=1",
+    "OMLX_MTP_DRAFT_TOKENS=5",
+    "OMLX_MTP_ROWWISE_BATCH=0",
+    "DSV4_CONTROL_HOST=10.0.0.1",
+    "DSV4_CONTROL_PORT=29650",
+    "DSV4_READY_FILE=/tmp/deepseek-v4/ready",
+    "DSV4_WORK=/same/path/on/both-ranks/omlx-checkout",
+    "DSV4_MODEL=/same/path/on/both-ranks/DeepSeek-V4-Flash-0731",
+    "DSV4_SERVER_EP=/same/path/on/both-ranks/deepseek-v4-macos-jaccl/runtime/server_ep2.py"
+  ]
+}
+```
+
 The separate rank-control socket is only for rank-0-authoritative speculative
 control. Model tensors and model collectives must remain on JACCL.
 
 ### 4. Launch and verify
 
-Set the values consumed by
-[`examples/run-rank-server.sh`](examples/run-rank-server.sh) on the launch
-machine:
+With `OMLX` and `REPO` set on the launch machine and the three `DSV4_*` paths
+in the hostfile, launch [`examples/run-rank-server.sh`](examples/run-rank-server.sh):
 
 ```bash
-export DSV4_WORK="$OMLX"
-export DSV4_MODEL="$MODEL"
-export DSV4_SERVER_EP="$PWD/runtime/server_ep2.py"
-
 $OMLX/venv/bin/mlx.launch --verbose \
-  --hostfile examples/hosts-jaccl.json \
+  --hostfile "$REPO/examples/hosts-jaccl.json" \
   --cwd "$OMLX" \
   --python "$OMLX/venv/bin/python" \
-  "$PWD/examples/run-rank-server.sh"
+  "$REPO/examples/run-rank-server.sh"
 ```
 
 The hostfile supplies the rank-specific SSH/RDMA topology; the rank launcher
