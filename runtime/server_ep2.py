@@ -16,7 +16,9 @@ import mlx.core as mx
 from mlx.nn.layers.distributed import shard_inplace
 
 READY_FILE = os.environ.get("DSV4_READY_FILE", "/tmp/deepseek-v4/ready")
-CONTROL_HOST = os.environ.get("DSV4_CONTROL_HOST", "10.0.0.1")
+CONTROL_HOST = os.environ.get("DSV4_CONTROL_HOST")
+if not CONTROL_HOST:
+    raise RuntimeError("DSV4_CONTROL_HOST must be set to rank 0's direct-link address")
 CONTROL_PORT = int(os.environ.get("DSV4_CONTROL_PORT", "29650"))
 
 

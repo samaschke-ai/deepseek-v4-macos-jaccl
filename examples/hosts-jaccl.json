@@ -4,20 +4,23 @@
     "OMLX_MTP_ENABLED=1",
     "OMLX_MTP_DRAFT_TOKENS=5",
     "OMLX_MTP_ROWWISE_BATCH=0",
-    "DSV4_CONTROL_HOST=10.0.0.1",
+    "DSV4_CONTROL_HOST=rank-0-direct-address",
     "DSV4_CONTROL_PORT=29650",
-    "DSV4_READY_FILE=/tmp/deepseek-v4/ready"
+    "DSV4_READY_FILE=/tmp/deepseek-v4/ready",
+    "DSV4_WORK=omlx-path",
+    "DSV4_MODEL=checkpoint-path",
+    "DSV4_SERVER_EP=repository-path/runtime/server_ep2.py"
   ],
   "hosts": [
     {
-      "ssh": "127.0.0.1",
-      "ips": ["10.0.1.10"],
-      "rdma": [null, "rdma_enX"]
+      "ssh": "rank-0.example.invalid",
+      "ips": ["rank-0-rdma-address"],
+      "rdma": [null, "rdma-rank-0"]
     },
     {
-      "ssh": "model-rank-1.local",
-      "ips": ["10.0.1.11"],
-      "rdma": ["rdma_enY", null]
+      "ssh": "rank-1.example.invalid",
+      "ips": ["rank-1-rdma-address"],
+      "rdma": ["rdma-rank-1", null]
     }
   ]
 }
