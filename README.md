@@ -36,14 +36,32 @@ The original figures are pre-remediation production measurements. The
 stage-level figures below isolate individual route-mask, power, and rollback
 changes and therefore use different immediate baselines.
 
+### 100 tok/s optimization track (2026-08-05)
+
+The current objective is at least **100 visible tok/s for one warmed request**;
+aggregate concurrency throughput is reported separately. On the exact DGX
+`count300` workload, the canonical EP2 runtime currently measures **60.88
+visible tok/s median** and **61.21 tok/s best** across three matched repeats,
+with 5.84 tokens/cycle, 98.5% speculative acceptance, and 95.99 ms median
+cycle latency. Reaching 100 tok/s at the measured yield requires approximately
+58.4 ms/cycle.
+
+Two correctness-first attention candidates were evaluated and were not
+promoted. Gathering reduced Q-head outputs changed numerics after layer 9;
+gathering the Q projection before canonical full-head attention was bit-exact
+through all 43 layers but measured 57.17 tok/s median because its per-layer
+collectives outweighed the projection savings. The canonical EP2 deployment
+remains the reference; no candidate was deployed. Full details are in
+[`results/deepseek-100tps-phase-20260805.json`](results/deepseek-100tps-phase-20260805.json).
+
 ### Current optimization track
 
 The EP-aware masked small-M MXFP4 QMV candidate raised a matched counting run
 from 36.60 to **40.36 visible tok/s** (+10.3%) while preserving 3.76
 tokens/cycle and the exact five-position acceptance counts. The real-shape
-projection microbenchmark improved from 0.717 to 0.433 ms. The new 20–25% goal
-from the pre-QMV current values remains open (TG target 43.7–47.2 tok/s; 32K PP
-target 344.6–358.9 tok/s).
+projection microbenchmark improved from 0.717 to 0.433 ms. That 20–25% target
+was an intermediate milestone; the active objective is now the single-request
+100 tok/s gate described above.
 
 Implementation and checksum-pinned wheel:
 

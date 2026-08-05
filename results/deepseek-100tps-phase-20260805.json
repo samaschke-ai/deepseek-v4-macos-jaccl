@@ -1,0 +1,49 @@
+{
+  "date": "2026-08-05",
+  "objective": "at least 100 visible tokens/s for one warmed request",
+  "checkpoint": "deepseek-ai/DeepSeek-V4-Flash-0731 official lineage",
+  "system": {
+    "hosts": "two Apple M4 Max systems with 128 GB unified memory each",
+    "transport": "MLX JACCL over direct Thunderbolt RDMA",
+    "parallelism": "128 routed experts per rank; trunk, shared experts, and DSpark replicated",
+    "serving": "six prompt slots, six decode slots, dynamic caches, 1,048,576-token context"
+  },
+  "workload": {
+    "name": "exact count300",
+    "warmup": "one warm-up followed by three measured repeats",
+    "completion_tokens": 637,
+    "cycles": 109,
+    "tokens_per_cycle": 5.84,
+    "accepted": 527,
+    "drafted": 535,
+    "acceptance_rate": 0.985,
+    "output_sha256": "4af21b759f75b9636a706428ab27f0d5defb75c93f479cecf304e17a19a0edd9"
+  },
+  "canonical": {
+    "visible_tokens_per_second": [61.20669160474016, 60.88024034779234, 60.38648225694176],
+    "median_visible_tokens_per_second": 60.88024034779234,
+    "best_visible_tokens_per_second": 61.20669160474016,
+    "cycle_ms": [95.4803558896347, 95.99233944975096, 96.77723356001421],
+    "median_cycle_ms": 95.99233944975096,
+    "rank_control_agreement": true
+  },
+  "candidates": {
+    "post_attention_head_gather": {
+      "design": "shard Q heads and sinks, gather head outputs before replicated output projections",
+      "depth_8": "bit-identical across attention compression ratios 0, 4, and 128",
+      "full_depth": "rejected; first numerical difference appeared after layer 9 attention",
+      "decision": "rejected for exactness"
+    },
+    "pre_attention_q_gather": {
+      "design": "column-shard segmented Q projection, gather Q projection output, then execute canonical full-head attention",
+      "full_depth": "46 checkpoints exact through 43 layers, including final hidden state and logits",
+      "visible_tokens_per_second": [57.168550512437314, 57.3477029476334, 56.752495471877765],
+      "median_visible_tokens_per_second": 57.168550512437314,
+      "median_cycle_ms": 102.22467851404255,
+      "relative_to_canonical_percent": -6.096706935043528,
+      "decision": "rejected for performance; one extra collective per layer outweighed projection savings"
+    }
+  },
+  "decision": "retain canonical EP2; no candidate was deployed",
+  "next_gate": "reduce the approximately 95.99 ms canonical cycle toward 58.4 ms without adding a latency-bound collective per layer"
+}
