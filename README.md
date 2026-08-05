@@ -101,6 +101,7 @@ Check the paths and versions on both ranks before patching:
 
 ```bash
 test -x "$PYTHON" && test -d "$MODEL" && test -f "$REPO/runtime/server_ep2.py"
+test -x "$REPO/examples/run-rank-server.sh"
 test "$(git -C "$OMLX" rev-parse HEAD)" = \
   "e0121d511bb3ab7d38a9e6b7d6e5ffc6e4f0c96f"
 test "$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.13"
@@ -141,6 +142,22 @@ $PYTHON "$REPO/patches/install_native_kernels.py" \
 $PYTHON "$REPO/tests/test_pooling_rollback.py" "$CACHE"
 ```
 
+On each rank, record the repository revision and checksums below. Do not launch
+until the two outputs are identical; mismatched Python or native artifacts can
+make distributed ranks diverge or hang.
+
+```bash
+test -z "$(git -C "$REPO" status --porcelain)"
+git -C "$REPO" rev-parse HEAD
+shasum -a 256 \
+  "$FAST" "$SWITCH" "$CACHE" "$MTP_MODEL" "$MTP_BATCH" \
+  "$REPO/runtime/server_ep2.py" \
+  "$REPO/examples/run-rank-server.sh" \
+  "$OMLX/omlx/custom_kernels/glm_moe_dsa/_ext.cpython-313-darwin.so" \
+  "$OMLX/omlx/custom_kernels/glm_moe_dsa/libomlx_glm_kernel_ops.dylib" \
+  "$OMLX/omlx/custom_kernels/glm_moe_dsa/omlx_glm_kernels.metallib"
+```
+
 ### 3. Configure JACCL
 
 Copy [`examples/hosts-jaccl.json`](examples/hosts-jaccl.json) and replace the
@@ -176,25 +193,35 @@ $OMLX/venv/bin/mlx.launch --verbose \
   "$REPO/examples/run-rank-server.sh"
 ```
 
-Publish only the rank-0 API endpoint. Check readiness and the model list before
-sending client traffic:
+The server listens on rank 0 loopback only. Do not expose that listener or the
+bundled router directly. Before sending client traffic, put the rank-0 API
+behind a private ingress that terminates TLS and enforces bearer authentication;
+this repository does not provision that environment-specific ingress.
+
+Use the credential issued by the ingress to check readiness and the model list:
 
 ```bash
-export BASE_URL=https://<rank-0-api-host>/v1
-curl -fsS "$BASE_URL/models"
+export BASE_URL=https://rank-0-api.example.invalid/v1
+: "${OPENAI_API_KEY:?Set the bearer token issued by the private API ingress}"
+curl -fsS --config - "$BASE_URL/models" <<EOF
+header = "Authorization: Bearer $OPENAI_API_KEY"
+EOF
 ```
 
-A minimal streaming request is:
+Passing the header through curl's standard-input config keeps the expanded token
+out of process arguments. A minimal authenticated streaming request is:
 
 ```bash
-curl -N "$BASE_URL/chat/completions" \
+curl -N --config - "$BASE_URL/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "deepseek-v4-flash",
     "messages": [{"role": "user", "content": "Explain JACCL in one sentence."}],
     "stream": true,
     "max_tokens": 64
-  }'
+  }' <<EOF
+header = "Authorization: Bearer $OPENAI_API_KEY"
+EOF
 ```
 
 ## Benchmarking
