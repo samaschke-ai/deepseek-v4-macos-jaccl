@@ -47,9 +47,12 @@ def main():
         return
     guard_start(a.role, a.rpc_host)
     if a.role == 'coordinator':
-        for entry in m['files']:
-            if (a.models/entry['path']).stat().st_size != entry['bytes']:
-                p.error('Model file size mismatch: '+entry['path'])
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('recipe_preflight', Path(__file__).resolve().with_name('preflight.py'))
+        assert spec and spec.loader
+        preflight = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(preflight)
+        preflight.verify_files(a.models, m)
     os.execv(args[0], args)
 
 if __name__ == '__main__':
