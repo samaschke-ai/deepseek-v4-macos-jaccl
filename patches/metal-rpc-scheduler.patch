@@ -1,0 +1,1477 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index 2669cac..43fa84e 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -1674,6 +1674,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.n_batch = value;
+         }
+     ).set_env("LLAMA_ARG_BATCH"));
++    add_opt(common_arg(
++        {"--prefill-budget"}, "N",
++        "decode-active text prefill budget divided by generating slots (0 = disabled; does not bound image encoding or image-token decoding)",
++        [](common_params & params, int value) {
++            if (value < 0) {
++                throw std::invalid_argument("prefill-budget must be non-negative");
++            }
++            params.n_prefill_budget = value;
++        }
++    ).set_env("LLAMA_ARG_PREFILL_BUDGET").set_examples({LLAMA_EXAMPLE_SERVER}));
+     add_opt(common_arg(
+         {"-ub", "--ubatch-size"}, "N",
+         string_format("physical maximum batch size (default: %d)", params.n_ubatch),
+diff --git a/common/common.h b/common/common.h
+index 63d0bad..43ded9b 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -449,6 +449,7 @@ struct common_params {
+     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
+     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
+     int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
++    int32_t n_prefill_budget      =     0; // decode-active text prefill budget (0 = disabled)
+     int32_t n_ubatch              =   512; // physical batch size for prompt processing (must be >=32 to use BLAS)
+     int32_t n_keep                =     0; // number of tokens to keep from initial prompt
+     int32_t n_chunks              =    -1; // max number of chunks to process (-1 = unlimited)
+diff --git a/ggml/src/ggml-metal/ggml-metal-common.cpp b/ggml/src/ggml-metal/ggml-metal-common.cpp
+index 6f1638a..234768e 100644
+--- a/ggml/src/ggml-metal/ggml-metal-common.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-common.cpp
+@@ -15,11 +15,14 @@ bool ggml_metal_op_mul_mat_use_mm(const struct ggml_tensor * op, bool has_simdgr
+            has_simdgroup_mm && ne00 >= 64 && ne11 > 8;
+ }
+ 
++// PATCH: 32 -> 8 so small MoE decode batches (parallel slots, speculative
++// verify batches of 2..8 tokens) reach the simdgroup matrix kernel instead of
++// falling back to the vector kernel. CUDA analogue: ggml-org#27342.
+ bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
+     const int64_t ne00 = op->src[0]->ne[0];
+     const int64_t ne21 = op->src[2]->ne[1];
+ 
+-    return has_simdgroup_mm && ne00 >= 64 && ne21 >= 32;
++    return has_simdgroup_mm && ne00 >= 64 && ne21 >= 8;
+ }
+ 
+ // represents a memory range (i.e. an interval from a starting address p0 to an ending address p1 in a given buffer pb)
+diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
+index a97db24..56d60e6 100644
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
+@@ -31,9 +31,6 @@ static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
+ 
+ namespace fs = std::filesystem;
+ 
+-// macro for nicer error messages on server crash
+-#define RPC_STATUS_ASSERT(x) if (!(x)) GGML_ABORT("Remote RPC server crashed or returned malformed response")
+-
+ // all RPC structures must be packed
+ #pragma pack(push, 1)
+ // ggml_tensor is serialized into rpc_tensor
+@@ -351,7 +348,10 @@ static bool negotiate_hello(const std::shared_ptr<socket_t> & sock) {
+     sock->get_caps(request.conn_caps);
+ 
+     bool status = send_rpc_cmd(sock, RPC_CMD_HELLO, &request, sizeof(request), &response, sizeof(response));
+-    RPC_STATUS_ASSERT(status);
++    if (!status) {
++        GGML_LOG_ERROR("RPC HELLO request failed\n");
++        return false;
++    }
+ 
+     if (response.major != RPC_PROTO_MAJOR_VERSION || response.minor > RPC_PROTO_MINOR_VERSION) {
+         GGML_LOG_ERROR("RPC server version mismatch: %d.%d.%d\n",
+@@ -396,6 +396,13 @@ public:
+         cvar.notify_all();
+     }
+ 
++    std::queue<T> take_all() {
++        std::unique_lock<std::mutex> lock(mutex);
++        std::queue<T> pending;
++        pending.swap(queue);
++        return pending;
++    }
++
+ private:
+     bool interrupted = false;
+     std::queue<T> queue;
+@@ -405,22 +412,24 @@ private:
+ 
+ class rpc_dispatcher {
+ public:
+-    rpc_dispatcher() {
+-    }
++    rpc_dispatcher() = default;
+ 
+-    void send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size);
+-    void send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size);
+-    void send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size);
+-    void send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size);
++    bool send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size);
++    bool send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size);
++    bool send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size);
++    bool send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size);
+ 
+     ggml_backend_event_t event_new(ggml_backend_dev_t dev);
+-    void event_free(ggml_backend_event_t event);
+-    void event_synchronize(ggml_backend_event_t event);
+-    void event_record(ggml_backend_event_t event);
+-    void synchronize();
++    static void event_free(ggml_backend_event_t event);
++    static bool event_synchronize(ggml_backend_event_t event);
++    bool event_record(ggml_backend_event_t event);
++    bool synchronize();
+ 
+-    void start(const std::string & endpoint);
++    bool start(const std::string & endpoint);
+     void work();
++    bool is_healthy() const {
++        return healthy.load() && running.load();
++    }
+ 
+     ~rpc_dispatcher();
+ 
+@@ -431,18 +440,27 @@ private:
+         size_t                        input_size;
+         void                        * output;
+         size_t                        output_size;
+-        std::promise<void>            completion;
++        std::promise<bool>            completion;
+     };
+     using rpc_msg_ptr   = std::shared_ptr<rpc_msg>;
+     using rpc_msg_queue = message_queue<rpc_msg_ptr>;
+     struct rpc_event {
+         rpc_msg_ptr              msg;
+-        std::shared_future<void> sf;
++        std::shared_future<bool> sf;
+     };
+-    rpc_msg_queue    queue;
+-    socket_ptr       sock;
+-    std::atomic_bool running;
+-    std::thread      thread;
++
++    void complete(const rpc_msg_ptr & msg, bool status);
++    void fail_pending();
++    void fail_connection();
++    void stop();
++    socket_ptr current_socket();
++
++    rpc_msg_queue       queue;
++    socket_ptr          sock;
++    std::mutex          socket_mutex;
++    std::atomic_bool    running{false};
++    std::atomic_bool    healthy{false};
++    std::thread         thread;
+ };
+ 
+ static void rpc_dispatcher_trampoline(rpc_dispatcher * dispatcher)
+@@ -450,48 +468,79 @@ static void rpc_dispatcher_trampoline(rpc_dispatcher * dispatcher)
+     dispatcher->work();
+ }
+ 
+-void rpc_dispatcher::send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size) {
++bool rpc_dispatcher::send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size) {
+     auto msg = std::make_shared<rpc_msg>();
+     msg->cmd = cmd;
+     msg->input = input;
+     msg->input_size = input_size;
+     msg->output = nullptr;
+     msg->output_size = 0;
+-    GGML_ASSERT(queue.push(msg));
+     auto future = msg->completion.get_future();
+-    future.wait();
++    if (!queue.push(msg)) {
++        return false;
++    }
++    return future.get();
+ }
+ 
+-void rpc_dispatcher::send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size) {
++bool rpc_dispatcher::send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size) {
+     auto msg = std::make_shared<rpc_msg>();
+     msg->cmd = cmd;
+     msg->input = input;
+     msg->input_size = input_size;
+     msg->output = nullptr;
+     msg->output_size = 0;
+-    GGML_ASSERT(queue.push(msg));
++    return queue.push(msg);
+ }
+ 
+-void rpc_dispatcher::send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size) {
++bool rpc_dispatcher::send(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size) {
+     auto msg = std::make_shared<rpc_msg>();
+     msg->cmd = cmd;
+     msg->input = input;
+     msg->input_size = input_size;
+     msg->output = output;
+     msg->output_size = output_size;
+-    GGML_ASSERT(queue.push(msg));
+     auto future = msg->completion.get_future();
+-    future.wait();
++    if (!queue.push(msg)) {
++        return false;
++    }
++    return future.get();
+ }
+ 
+-void rpc_dispatcher::send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size) {
++bool rpc_dispatcher::send_async(enum rpc_cmd cmd, std::shared_ptr<const void> input, size_t input_size, void * output, size_t output_size) {
+     auto msg = std::make_shared<rpc_msg>();
+     msg->cmd = cmd;
+     msg->input = input;
+     msg->input_size = input_size;
+     msg->output = output;
+     msg->output_size = output_size;
+-    GGML_ASSERT(queue.push(msg));
++    return queue.push(msg);
++}
++
++void rpc_dispatcher::complete(const rpc_msg_ptr & msg, bool status) {
++    msg->completion.set_value(status);
++}
++
++void rpc_dispatcher::fail_pending() {
++    auto pending = queue.take_all();
++    while (!pending.empty()) {
++        complete(pending.front(), false);
++        pending.pop();
++    }
++}
++
++socket_ptr rpc_dispatcher::current_socket() {
++    std::lock_guard<std::mutex> lock(socket_mutex);
++    return sock;
++}
++
++void rpc_dispatcher::fail_connection() {
++    healthy = false;
++    running = false;
++    queue.interrupt();
++    auto current = current_socket();
++    if (current) {
++        current->shutdown();
++    }
+ }
+ 
+ ggml_backend_event_t rpc_dispatcher::event_new(ggml_backend_dev_t dev) {
+@@ -499,7 +548,10 @@ ggml_backend_event_t rpc_dispatcher::event_new(ggml_backend_dev_t dev) {
+     ev->msg = std::make_shared<rpc_msg>();
+     ev->msg->cmd = RPC_CMD_NONE;
+     ev->sf = ev->msg->completion.get_future().share();
+-    GGML_ASSERT(queue.push(ev->msg));
++    if (!queue.push(ev->msg)) {
++        delete ev;
++        return nullptr;
++    }
+     return new ggml_backend_event {
+         /* .device  = */ dev,
+         /* .context = */ ev,
+@@ -511,47 +563,85 @@ void rpc_dispatcher::event_free(ggml_backend_event_t event) {
+     delete ev;
+ }
+ 
+-void rpc_dispatcher::event_synchronize(ggml_backend_event_t event) {
++bool rpc_dispatcher::event_synchronize(ggml_backend_event_t event) {
++    if (event == nullptr) {
++        return false;
++    }
+     rpc_event * ev = (rpc_event *)event->context;
+-    ev->sf.wait();
++    return ev->sf.valid() && ev->sf.get();
+ }
+ 
+-void rpc_dispatcher::event_record(ggml_backend_event_t event) {
++bool rpc_dispatcher::event_record(ggml_backend_event_t event) {
++    if (event == nullptr) {
++        return false;
++    }
+     rpc_event * ev = (rpc_event *)event->context;
+-    ev->msg = std::make_shared<rpc_msg>();
+-    ev->msg->cmd = RPC_CMD_NONE;
+-    ev->sf = ev->msg->completion.get_future().share();
+-    GGML_ASSERT(queue.push(ev->msg));
++    auto msg = std::make_shared<rpc_msg>();
++    msg->cmd = RPC_CMD_NONE;
++    auto future = msg->completion.get_future().share();
++    if (!queue.push(msg)) {
++        return false;
++    }
++    ev->msg = std::move(msg);
++    ev->sf = std::move(future);
++    return true;
+ }
+ 
+-void rpc_dispatcher::synchronize() {
++bool rpc_dispatcher::synchronize() {
+     // to ensure all messages are processed, submit dummy message and wait for it to complete
+     auto msg = std::make_shared<rpc_msg>();
+     msg->cmd = RPC_CMD_NONE;
+-    GGML_ASSERT(queue.push(msg));
+-    msg->completion.get_future().wait();
++    auto future = msg->completion.get_future();
++    if (!queue.push(msg)) {
++        return false;
++    }
++    return future.get();
+ }
+ 
+-void rpc_dispatcher::start(const std::string & endpoint) {
++bool rpc_dispatcher::start(const std::string & endpoint) {
+     std::string host;
+     int port;
+     if (!parse_endpoint(endpoint, host, port)) {
+-        GGML_ABORT("Failed to parse endpoint: %s\n", endpoint.c_str());
++        GGML_LOG_ERROR("Failed to parse RPC endpoint: %s\n", endpoint.c_str());
++        return false;
+     }
+     if (!rpc_transport_init()) {
+-        GGML_ABORT("RPC transport initialization failed\n");
++        GGML_LOG_ERROR("RPC transport initialization failed\n");
++        return false;
+     }
+ 
+-    sock = socket_t::connect(host.c_str(), port);
+-    if (sock == nullptr) {
+-        GGML_ABORT("Failed to connect to %s\n", endpoint.c_str());
++    auto connected = socket_t::connect(host.c_str(), port);
++    if (connected == nullptr) {
++        GGML_LOG_ERROR("Failed to connect to %s\n", endpoint.c_str());
++        return false;
+     }
+-    if (!negotiate_hello(sock)) {
+-        GGML_ABORT("RPC handshake failed for %s\n", endpoint.c_str());
++    if (!negotiate_hello(connected)) {
++        GGML_LOG_ERROR("RPC handshake failed for %s\n", endpoint.c_str());
++        connected->shutdown();
++        return false;
++    }
++    {
++        std::lock_guard<std::mutex> lock(socket_mutex);
++        sock = std::move(connected);
+     }
+-    LOG_DBG("[%s] connected to %s\n", __func__, endpoint.c_str());
+     running = true;
+-    thread = std::thread(rpc_dispatcher_trampoline, this);
++    healthy = true;
++    try {
++        thread = std::thread(rpc_dispatcher_trampoline, this);
++    } catch (...) {
++        running = false;
++        healthy = false;
++        queue.interrupt();
++        auto current = current_socket();
++        if (current) {
++            current->shutdown();
++        }
++        std::lock_guard<std::mutex> lock(socket_mutex);
++        sock.reset();
++        return false;
++    }
++    LOG_DBG("[%s] connected to %s\n", __func__, endpoint.c_str());
++    return true;
+ }
+ 
+ void rpc_dispatcher::work() {
+@@ -560,42 +650,78 @@ void rpc_dispatcher::work() {
+         if (!queue.pop(&msg_ptr)) {
+             break;
+         }
++        if (!running) {
++            complete(msg_ptr, false);
++            break;
++        }
++        bool status = true;
+         if (msg_ptr->cmd != RPC_CMD_NONE) {
+-            if (msg_ptr->output) {
+-                bool status = send_rpc_cmd(sock, msg_ptr->cmd, msg_ptr->input.get(), msg_ptr->input_size, msg_ptr->output, msg_ptr->output_size);
+-                RPC_STATUS_ASSERT(status);
++            auto current = current_socket();
++            if (current == nullptr) {
++                status = false;
++            } else if (msg_ptr->output) {
++                status = send_rpc_cmd(current, msg_ptr->cmd, msg_ptr->input.get(), msg_ptr->input_size, msg_ptr->output, msg_ptr->output_size);
+             } else {
+-                bool status = send_rpc_cmd(sock, msg_ptr->cmd, msg_ptr->input.get(), msg_ptr->input_size);
+-                RPC_STATUS_ASSERT(status);
++                status = send_rpc_cmd(current, msg_ptr->cmd, msg_ptr->input.get(), msg_ptr->input_size);
+             }
+         }
+-        msg_ptr->completion.set_value();
++        complete(msg_ptr, status);
++        if (!status) {
++            fail_connection();
++            break;
++        }
+     }
++    running = false;
++    healthy = false;
++    fail_pending();
+ }
+ 
+-rpc_dispatcher::~rpc_dispatcher() {
++void rpc_dispatcher::stop() {
+     running = false;
++    healthy = false;
+     queue.interrupt();
+-    sock = nullptr;
++    auto current = current_socket();
++    if (current) {
++        current->shutdown();
++    }
+     if (thread.joinable()) {
+         thread.join();
+     }
++    {
++        std::lock_guard<std::mutex> lock(socket_mutex);
++        sock.reset();
++    }
++    fail_pending();
++}
++
++rpc_dispatcher::~rpc_dispatcher() {
++    stop();
+ }
+ 
+ static std::shared_ptr<rpc_dispatcher> get_dispatcher(const std::string & endpoint) {
+     static std::mutex mutex;
+     std::lock_guard<std::mutex> lock(mutex);
+-    static std::unordered_map<std::string, std::weak_ptr<rpc_dispatcher>> dispatchers;
++    // Keep one live dispatcher per endpoint so loader/device queries do not
++    // create a new TCP session for every call. The public RPC API supports at
++    // most GGML_RPC_MAX_SERVERS endpoints, which also bounds retained state.
++    static std::unordered_map<std::string, std::shared_ptr<rpc_dispatcher>> dispatchers;
+ 
+     auto it = dispatchers.find(endpoint);
+     if (it != dispatchers.end()) {
+-        if (auto dispatcher = it->second.lock()) {
+-            return dispatcher;
++        if (it->second->is_healthy()) {
++            return it->second;
+         }
++        dispatchers.erase(it);
++    }
++    if (dispatchers.size() >= GGML_RPC_MAX_SERVERS) {
++        GGML_LOG_ERROR("RPC endpoint cache is full; refusing endpoint %s\n", endpoint.c_str());
++        return nullptr;
+     }
+ 
+     auto dispatcher = std::make_shared<rpc_dispatcher>();
+-    dispatcher->start(endpoint);
++    if (!dispatcher->start(endpoint)) {
++        return nullptr;
++    }
+     dispatchers[endpoint] = dispatcher;
+     return dispatcher;
+ }
+@@ -604,7 +730,9 @@ static void ggml_backend_rpc_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
+     auto request = std::make_shared<rpc_msg_free_buffer_req>();
+     request->remote_ptr = ctx->remote_ptr;
+-    ctx->dispatcher->send(RPC_CMD_FREE_BUFFER, request, sizeof(*request));
++    if (!ctx->dispatcher->send(RPC_CMD_FREE_BUFFER, request, sizeof(*request))) {
++        GGML_LOG_ERROR("RPC FREE_BUFFER failed\n");
++    }
+     delete ctx;
+ }
+ 
+@@ -615,8 +743,11 @@ static void * ggml_backend_rpc_buffer_get_base(ggml_backend_buffer_t buffer) {
+     }
+     auto request = std::make_shared<rpc_msg_buffer_get_base_req>();
+     request->remote_ptr = ctx->remote_ptr;
+-    rpc_msg_buffer_get_base_rsp response;
+-    ctx->dispatcher->send(RPC_CMD_BUFFER_GET_BASE, request, sizeof(*request), &response, sizeof(response));
++    rpc_msg_buffer_get_base_rsp response = {};
++    if (!ctx->dispatcher->send(RPC_CMD_BUFFER_GET_BASE, request, sizeof(*request), &response, sizeof(response))) {
++        GGML_LOG_ERROR("RPC BUFFER_GET_BASE failed\n");
++        return nullptr;
++    }
+     ctx->base_ptr = reinterpret_cast<void *>(response.base_ptr);
+     return ctx->base_ptr;
+ }
+@@ -681,7 +812,10 @@ static enum ggml_status ggml_backend_rpc_buffer_init_tensor(ggml_backend_buffer_
+     if (ggml_is_quantized(tensor->type) && (tensor->ne[0] % 512 != 0) && (tensor->view_src == nullptr)) {
+         auto request = std::make_shared<rpc_msg_init_tensor_req>();
+         request->tensor = serialize_tensor(tensor);
+-        ctx->dispatcher->send(RPC_CMD_INIT_TENSOR, request, sizeof(*request));
++        if (!ctx->dispatcher->send(RPC_CMD_INIT_TENSOR, request, sizeof(*request))) {
++            GGML_LOG_ERROR("RPC INIT_TENSOR failed\n");
++            return GGML_STATUS_FAILED;
++        }
+     }
+     return GGML_STATUS_SUCCESS;
+ }
+@@ -694,7 +828,9 @@ static void ggml_backend_rpc_buffer_memset_tensor(
+     request->offset = offset;
+     request->size   = size;
+     request->value  = value;
+-    ctx->dispatcher->send(RPC_CMD_MEMSET_TENSOR, request, sizeof(*request));
++    if (!ctx->dispatcher->send(RPC_CMD_MEMSET_TENSOR, request, sizeof(*request))) {
++        GGML_LOG_ERROR("RPC MEMSET_TENSOR failed\n");
++    }
+ }
+ 
+ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+@@ -705,8 +841,11 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
+         request->tensor = rpc_tensor;
+         request->offset = offset;
+         request->hash = fnv_hash((const uint8_t*)data, size);
+-        rpc_msg_set_tensor_hash_rsp response;
+-        ctx->dispatcher->send(RPC_CMD_SET_TENSOR_HASH, request, sizeof(*request), &response, sizeof(response));
++        rpc_msg_set_tensor_hash_rsp response = {};
++        if (!ctx->dispatcher->send(RPC_CMD_SET_TENSOR_HASH, request, sizeof(*request), &response, sizeof(response))) {
++            GGML_LOG_ERROR("RPC SET_TENSOR_HASH failed\n");
++            return;
++        }
+         if (response.result) {
+             // the server has the same data, no need to send it
+             return;
+@@ -719,7 +858,9 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
+     memcpy(input + sizeof(rpc_tensor), &offset, sizeof(offset));
+     memcpy(input + sizeof(rpc_tensor) + sizeof(offset), data, size);
+     std::shared_ptr<uint8_t> input_ptr(input, std::default_delete<uint8_t[]>());
+-    ctx->dispatcher->send(RPC_CMD_SET_TENSOR, input_ptr, input_size);
++    if (!ctx->dispatcher->send(RPC_CMD_SET_TENSOR, input_ptr, input_size)) {
++        GGML_LOG_ERROR("RPC SET_TENSOR failed\n");
++    }
+ }
+ 
+ static void ggml_backend_rpc_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+@@ -728,7 +869,9 @@ static void ggml_backend_rpc_buffer_get_tensor(ggml_backend_buffer_t buffer, con
+     request->tensor = serialize_tensor(tensor);
+     request->offset = offset;
+     request->size = size;
+-    ctx->dispatcher->send(RPC_CMD_GET_TENSOR, request, sizeof(*request), data, size);
++    if (!ctx->dispatcher->send(RPC_CMD_GET_TENSOR, request, sizeof(*request), data, size)) {
++        GGML_LOG_ERROR("RPC GET_TENSOR failed\n");
++    }
+ }
+ 
+ static bool ggml_backend_rpc_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
+@@ -745,8 +888,11 @@ static bool ggml_backend_rpc_buffer_cpy_tensor(ggml_backend_buffer_t buffer, con
+         auto request = std::make_shared<rpc_msg_copy_tensor_req>();
+         request->src = serialize_tensor(src);
+         request->dst = serialize_tensor(dst);
+-        rpc_msg_copy_tensor_rsp response;
+-        ctx->dispatcher->send(RPC_CMD_COPY_TENSOR, request, sizeof(*request), &response, sizeof(response));
++        rpc_msg_copy_tensor_rsp response = {};
++        if (!ctx->dispatcher->send(RPC_CMD_COPY_TENSOR, request, sizeof(*request), &response, sizeof(response))) {
++            GGML_LOG_ERROR("RPC COPY_TENSOR failed\n");
++            return false;
++        }
+         return response.result;
+     }
+     return false;
+@@ -757,7 +903,9 @@ static void ggml_backend_rpc_buffer_clear(ggml_backend_buffer_t buffer, uint8_t
+     auto request = std::make_shared<rpc_msg_buffer_clear_req>();
+     request->remote_ptr = ctx->remote_ptr;
+     request->value = value;
+-    ctx->dispatcher->send(RPC_CMD_BUFFER_CLEAR, request, sizeof(*request));
++    if (!ctx->dispatcher->send(RPC_CMD_BUFFER_CLEAR, request, sizeof(*request))) {
++        GGML_LOG_ERROR("RPC BUFFER_CLEAR failed\n");
++    }
+ }
+ 
+ static ggml_backend_buffer_i ggml_backend_rpc_buffer_interface = {
+@@ -784,10 +932,13 @@ static ggml_backend_buffer_t ggml_backend_rpc_buffer_type_alloc_buffer(ggml_back
+     auto request = std::make_shared<rpc_msg_alloc_buffer_req>();
+     request->device = buft_ctx->device;
+     request->size = size;
+-    rpc_msg_alloc_buffer_rsp response;
++    rpc_msg_alloc_buffer_rsp response = {};
+ 
+     auto dispatcher = get_dispatcher(buft_ctx->endpoint);
+-    dispatcher->send(RPC_CMD_ALLOC_BUFFER, request, sizeof(*request), &response, sizeof(response));
++    if (dispatcher == nullptr || !dispatcher->send(RPC_CMD_ALLOC_BUFFER, request, sizeof(*request), &response, sizeof(response))) {
++        GGML_LOG_ERROR("RPC ALLOC_BUFFER failed\n");
++        return nullptr;
++    }
+     if (response.remote_ptr != 0) {
+         ggml_backend_buffer_t buffer = ggml_backend_buffer_init(buft,
+             ggml_backend_rpc_buffer_interface,
+@@ -800,10 +951,16 @@ static ggml_backend_buffer_t ggml_backend_rpc_buffer_type_alloc_buffer(ggml_back
+ }
+ 
+ static size_t get_alignment(const std::shared_ptr<rpc_dispatcher> & dispatcher, uint32_t device) {
++    if (dispatcher == nullptr) {
++        return 0;
++    }
+     auto request = std::make_shared<rpc_msg_get_alignment_req>();
+     request->device = device;
+-    rpc_msg_get_alignment_rsp response;
+-    dispatcher->send(RPC_CMD_GET_ALIGNMENT, request, sizeof(*request), &response, sizeof(response));
++    rpc_msg_get_alignment_rsp response = {};
++    if (!dispatcher->send(RPC_CMD_GET_ALIGNMENT, request, sizeof(*request), &response, sizeof(response))) {
++        GGML_LOG_ERROR("RPC GET_ALIGNMENT failed\n");
++        return 0;
++    }
+     return response.alignment;
+ }
+ 
+@@ -813,10 +970,16 @@ static size_t ggml_backend_rpc_buffer_type_get_alignment(ggml_backend_buffer_typ
+ }
+ 
+ static size_t get_max_size(const std::shared_ptr<rpc_dispatcher> & dispatcher, uint32_t device) {
++    if (dispatcher == nullptr) {
++        return 0;
++    }
+     auto request = std::make_shared<rpc_msg_get_max_size_req>();
+     request->device = device;
+-    rpc_msg_get_max_size_rsp response;
+-    dispatcher->send(RPC_CMD_GET_MAX_SIZE, request, sizeof(*request), &response, sizeof(response));
++    rpc_msg_get_max_size_rsp response = {};
++    if (!dispatcher->send(RPC_CMD_GET_MAX_SIZE, request, sizeof(*request), &response, sizeof(response))) {
++        GGML_LOG_ERROR("RPC GET_MAX_SIZE failed\n");
++        return 0;
++    }
+     return response.max_size;
+ }
+ 
+@@ -888,9 +1051,12 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
+             request->srcs[i] = serialize_tensor(tensor->src[i]);
+         }
+ 
+-        rpc_msg_get_alloc_size_rsp response;
++        rpc_msg_get_alloc_size_rsp response = {};
+         auto dispatcher = get_dispatcher(buft_ctx->endpoint);
+-        dispatcher->send(RPC_CMD_GET_ALLOC_SIZE, request, sizeof(*request), &response, sizeof(response));
++        if (dispatcher == nullptr || !dispatcher->send(RPC_CMD_GET_ALLOC_SIZE, request, sizeof(*request), &response, sizeof(response))) {
++            GGML_LOG_ERROR("RPC GET_ALLOC_SIZE failed\n");
++            return ggml_nbytes(tensor);
++        }
+ 
+         {
+             std::lock_guard<std::mutex> lock(cache_mutex);
+@@ -932,9 +1098,12 @@ static void ggml_backend_rpc_set_tensor_async(ggml_backend_t backend, ggml_tenso
+         request->tensor = rpc_tensor;
+         request->offset = offset;
+         request->hash = fnv_hash((const uint8_t*)data, size);
+-        rpc_msg_set_tensor_hash_rsp response;
++        rpc_msg_set_tensor_hash_rsp response = {};
+         // TODO: make this async
+-        ctx->dispatcher->send(RPC_CMD_SET_TENSOR_HASH, request, sizeof(*request), &response, sizeof(response));
++        if (!ctx->dispatcher->send(RPC_CMD_SET_TENSOR_HASH, request, sizeof(*request), &response, sizeof(response))) {
++            GGML_LOG_ERROR("RPC SET_TENSOR_HASH failed\n");
++            return;
++        }
+         if (response.result) {
+             // the server has the same data, no need to send it
+             return;
+@@ -947,7 +1116,9 @@ static void ggml_backend_rpc_set_tensor_async(ggml_backend_t backend, ggml_tenso
+     memcpy(input + sizeof(rpc_tensor), &offset, sizeof(offset));
+     memcpy(input + sizeof(rpc_tensor) + sizeof(offset), data, size);
+     std::shared_ptr<uint8_t> input_ptr(input, std::default_delete<uint8_t[]>());
+-    ctx->dispatcher->send_async(RPC_CMD_SET_TENSOR, input_ptr, input_size);
++    if (!ctx->dispatcher->send_async(RPC_CMD_SET_TENSOR, input_ptr, input_size)) {
++        GGML_LOG_ERROR("RPC SET_TENSOR enqueue failed\n");
++    }
+ }
+ 
+ static void ggml_backend_rpc_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+@@ -956,12 +1127,16 @@ static void ggml_backend_rpc_get_tensor_async(ggml_backend_t backend, const ggml
+     request->tensor = serialize_tensor(tensor);
+     request->offset = offset;
+     request->size = size;
+-    ctx->dispatcher->send_async(RPC_CMD_GET_TENSOR, request, sizeof(*request), data, size);
++    if (!ctx->dispatcher->send_async(RPC_CMD_GET_TENSOR, request, sizeof(*request), data, size)) {
++        GGML_LOG_ERROR("RPC GET_TENSOR enqueue failed\n");
++    }
+ }
+ 
+ static void ggml_backend_rpc_synchronize(ggml_backend_t backend) {
+     ggml_backend_rpc_context * rpc_ctx = (ggml_backend_rpc_context *)backend->context;
+-    rpc_ctx->dispatcher->synchronize();
++    if (!rpc_ctx->dispatcher->synchronize()) {
++        GGML_LOG_ERROR("RPC synchronize failed\n");
++    }
+ }
+ 
+ static void add_tensor(ggml_tensor * tensor, const ggml_cgraph * cgraph, const std::shared_ptr<rpc_dispatcher> & dispatcher, std::vector<rpc_tensor> & tensors, std::unordered_set<ggml_tensor*> & visited) {
+@@ -1022,20 +1197,28 @@ static enum ggml_status ggml_backend_rpc_graph_compute(ggml_backend_t backend, g
+     if (reuse) {
+         auto request = std::make_shared<rpc_msg_graph_recompute_req>();
+         request->device = rpc_ctx->device;
+-        rpc_ctx->dispatcher->send_async(RPC_CMD_GRAPH_RECOMPUTE, request, sizeof(*request));
++        if (!rpc_ctx->dispatcher->send_async(RPC_CMD_GRAPH_RECOMPUTE, request, sizeof(*request))) {
++            GGML_LOG_ERROR("RPC GRAPH_RECOMPUTE enqueue failed\n");
++            return GGML_STATUS_FAILED;
++        }
+     } else {
+         rpc_dev_ctx->last_graph_uid = cgraph->uid;
+         size_t input_size = 0;
+         uint8_t * input = serialize_graph(rpc_ctx->device, cgraph, rpc_ctx->dispatcher, &input_size);
+         std::shared_ptr<uint8_t> input_ptr(input, std::default_delete<uint8_t[]>());
+-        rpc_ctx->dispatcher->send_async(RPC_CMD_GRAPH_COMPUTE, input_ptr, input_size);
++        if (!rpc_ctx->dispatcher->send_async(RPC_CMD_GRAPH_COMPUTE, input_ptr, input_size)) {
++            GGML_LOG_ERROR("RPC GRAPH_COMPUTE enqueue failed\n");
++            return GGML_STATUS_FAILED;
++        }
+     }
+     return GGML_STATUS_SUCCESS;
+ }
+ 
+ static void ggml_backend_rpc_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
+     ggml_backend_rpc_context * rpc_ctx = (ggml_backend_rpc_context *)backend->context;
+-    rpc_ctx->dispatcher->event_record(event);
++    if (!rpc_ctx->dispatcher->event_record(event)) {
++        GGML_LOG_ERROR("RPC event record failed\n");
++    }
+ }
+ 
+ static void ggml_backend_rpc_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+@@ -1074,8 +1257,16 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
+         return it->second;
+     }
+     auto dispatcher = get_dispatcher(endpoint);
++    if (dispatcher == nullptr) {
++        GGML_LOG_ERROR("Unable to create RPC dispatcher for %s\n", endpoint);
++        return nullptr;
++    }
+     size_t alignment = get_alignment(dispatcher, device);
+     size_t max_size = get_max_size(dispatcher, device);
++    if (alignment == 0) {
++        GGML_LOG_ERROR("Unable to query RPC buffer properties for %s\n", endpoint);
++        return nullptr;
++    }
+     ggml_backend_rpc_buffer_type_context * buft_ctx = new ggml_backend_rpc_buffer_type_context {
+         /* .endpoint  = */ endpoint,
+         /* .device    = */ device,
+@@ -1084,6 +1275,10 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
+         /* .max_size  = */ max_size
+     };
+     auto reg = ggml_backend_rpc_add_server(endpoint);
++    if (reg == nullptr) {
++        delete buft_ctx;
++        return nullptr;
++    }
+     ggml_backend_buffer_type_t buft = new ggml_backend_buffer_type {
+         /* .iface   = */ ggml_backend_rpc_buffer_type_interface,
+         /* .device  = */ ggml_backend_reg_dev_get(reg, device),
+@@ -1096,12 +1291,20 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
+ ggml_backend_t ggml_backend_rpc_init(const char * endpoint, uint32_t device) {
+     std::string dev_name = "RPC" + std::to_string(device) + "[" + std::string(endpoint) + "]";
+     auto dispatcher = get_dispatcher(endpoint);
++    if (dispatcher == nullptr) {
++        GGML_LOG_ERROR("Unable to create RPC dispatcher for %s\n", endpoint);
++        return nullptr;
++    }
+     ggml_backend_rpc_context * ctx = new ggml_backend_rpc_context {
+         /* .dispatcher = */ dispatcher,
+         /* .device     = */ device,
+         /* .name       = */ dev_name,
+     };
+     auto reg = ggml_backend_rpc_add_server(endpoint);
++    if (reg == nullptr) {
++        delete ctx;
++        return nullptr;
++    }
+     ggml_backend_t backend = new ggml_backend {
+         /* .guid    = */ ggml_backend_rpc_guid(),
+         /* .iface   = */ ggml_backend_rpc_interface,
+@@ -1117,10 +1320,19 @@ bool ggml_backend_is_rpc(ggml_backend_t backend) {
+ 
+ void ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device, size_t * free, size_t * total) {
+     auto dispatcher = get_dispatcher(endpoint);
++    if (dispatcher == nullptr) {
++        *free = 0;
++        *total = 0;
++        return;
++    }
+     auto request = std::make_shared<rpc_msg_get_device_memory_req>();
+     request->device = device;
+     rpc_msg_get_device_memory_rsp response;
+-    dispatcher->send(RPC_CMD_GET_DEVICE_MEMORY, request, sizeof(*request), &response, sizeof(response));
++    if (!dispatcher->send(RPC_CMD_GET_DEVICE_MEMORY, request, sizeof(*request), &response, sizeof(response))) {
++        *free = 0;
++        *total = 0;
++        return;
++    }
+     *free = response.free_mem;
+     *total = response.total_mem;
+ }
+@@ -2202,19 +2414,22 @@ static bool ggml_backend_rpc_device_supports_buft(ggml_backend_dev_t dev, ggml_b
+ static ggml_backend_event_t ggml_backend_rpc_device_event_new(ggml_backend_dev_t dev) {
+     ggml_backend_rpc_device_context * ctx = (ggml_backend_rpc_device_context *)dev->context;
+     auto dispatcher = get_dispatcher(ctx->endpoint);
++    if (dispatcher == nullptr) {
++        return nullptr;
++    }
+     return dispatcher->event_new(dev);
+ }
+ 
+ static void ggml_backend_rpc_device_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+-    ggml_backend_rpc_device_context * ctx = (ggml_backend_rpc_device_context *)dev->context;
+-    auto dispatcher = get_dispatcher(ctx->endpoint);
+-    dispatcher->event_free(event);
++    GGML_UNUSED(dev);
++    rpc_dispatcher::event_free(event);
+ }
+ 
+ static void ggml_backend_rpc_device_event_synchronize(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+-    ggml_backend_rpc_device_context * ctx = (ggml_backend_rpc_device_context *)dev->context;
+-    auto dispatcher = get_dispatcher(ctx->endpoint);
+-    dispatcher->event_synchronize(event);
++    GGML_UNUSED(dev);
++    if (!rpc_dispatcher::event_synchronize(event)) {
++        GGML_LOG_ERROR("RPC event synchronize failed\n");
++    }
+ }
+ 
+ static const struct ggml_backend_device_i ggml_backend_rpc_device_i = {
+@@ -2293,8 +2508,14 @@ ggml_backend_reg_t ggml_backend_rpc_reg(void) {
+ 
+ static uint32_t ggml_backend_rpc_get_device_count(const char * endpoint) {
+     auto dispatcher = get_dispatcher(endpoint);
+-    rpc_msg_device_count_rsp response;
+-    dispatcher->send(RPC_CMD_DEVICE_COUNT, nullptr, 0, &response, sizeof(response));
++    if (dispatcher == nullptr) {
++        return 0;
++    }
++    rpc_msg_device_count_rsp response = {};
++    if (!dispatcher->send(RPC_CMD_DEVICE_COUNT, nullptr, 0, &response, sizeof(response))) {
++        GGML_LOG_ERROR("RPC DEVICE_COUNT failed\n");
++        return 0;
++    }
+     return response.device_count;
+ }
+ 
+diff --git a/ggml/src/ggml-rpc/transport.cpp b/ggml/src/ggml-rpc/transport.cpp
+index 5ec15dc..0da92db 100644
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -129,6 +129,7 @@ struct socket_t::impl {
+     bool flush();
+     void get_caps(uint8_t * local_caps);
+     void update_caps(const uint8_t * remote_caps);
++    void shutdown();
+ 
+ #ifdef GGML_RPC_RDMA
+     std::optional<rdma_gid_t> rdma_build_target_gid();
+@@ -163,6 +164,18 @@ socket_t::impl::~impl() {
+ #endif
+ }
+ 
++void socket_t::impl::shutdown() {
++#ifdef _WIN32
++    if (fd != INVALID_SOCKET) {
++        ::shutdown(fd, SD_BOTH);
++    }
++#else
++    if (fd >= 0) {
++        ::shutdown(fd, SHUT_RDWR);
++    }
++#endif
++}
++
+ #ifdef GGML_RPC_RDMA
+ 
+ // Build a RoCE GID-shaped 16-byte target from a TCP socket's local address.
+@@ -488,10 +501,15 @@ bool socket_t::impl::send_data(const void * data, size_t size) {
+     }
+ #endif
+     size_t bytes_sent = 0;
++#ifdef MSG_NOSIGNAL
++    constexpr int send_flags = MSG_NOSIGNAL;
++#else
++    constexpr int send_flags = 0;
++#endif
+     while (bytes_sent < size) {
+         size_t size_to_send = std::min(size - bytes_sent, MAX_CHUNK_SIZE);
+-        ssize_t n = send(fd, (const char *)data + bytes_sent, size_to_send, 0);
+-        if (n < 0) {
++        ssize_t n = send(fd, (const char *)data + bytes_sent, size_to_send, send_flags);
++        if (n <= 0) {
+             GGML_LOG_ERROR("send failed (bytes_sent=%zu, size_to_send=%zu)\n",
+                            bytes_sent, size_to_send);
+             return false;
+@@ -620,6 +638,10 @@ void socket_t::update_caps(const uint8_t * remote_caps) {
+     return pimpl->update_caps(remote_caps);
+ }
+ 
++void socket_t::shutdown() {
++    pimpl->shutdown();
++}
++
+ static bool is_valid_fd(sockfd_t sockfd) {
+ #ifdef _WIN32
+     return sockfd != INVALID_SOCKET;
+@@ -628,6 +650,27 @@ static bool is_valid_fd(sockfd_t sockfd) {
+ #endif
+ }
+ 
++static void close_fd(sockfd_t sockfd) {
++    if (!is_valid_fd(sockfd)) {
++        return;
++    }
++#ifdef _WIN32
++    closesocket(sockfd);
++#else
++    close(sockfd);
++#endif
++}
++
++static bool set_no_sigpipe(sockfd_t sockfd) {
++#if defined(SO_NOSIGPIPE)
++    int flag = 1;
++    return setsockopt(sockfd, SOL_SOCKET, SO_NOSIGPIPE, (char *) &flag, sizeof(flag)) == 0;
++#else
++    GGML_UNUSED(sockfd);
++    return true;
++#endif
++}
++
+ static bool set_no_delay(sockfd_t sockfd) {
+     int flag = 1;
+     // set TCP_NODELAY to disable Nagle's algorithm
+@@ -646,8 +689,9 @@ socket_ptr socket_t::accept() {
+     if (!is_valid_fd(client_socket_fd)) {
+         return nullptr;
+     }
+-    if (!set_no_delay(client_socket_fd)) {
+-        GGML_LOG_ERROR("Failed to set TCP_NODELAY\n");
++    if (!set_no_delay(client_socket_fd) || !set_no_sigpipe(client_socket_fd)) {
++        GGML_LOG_ERROR("Failed to configure accepted TCP socket\n");
++        close_fd(client_socket_fd);
+         return nullptr;
+     }
+     return socket_ptr(new socket_t(std::make_unique<impl>(client_socket_fd)));
+@@ -660,10 +704,12 @@ socket_ptr socket_t::create_server(const char * host, int port) {
+     }
+     if (!set_reuse_addr(sockfd)) {
+         GGML_LOG_ERROR("Failed to set SO_REUSEADDR\n");
++        close_fd(sockfd);
+         return nullptr;
+     }
+     if (inet_addr(host) == INADDR_NONE) {
+         GGML_LOG_ERROR("Invalid host address: %s\n", host);
++        close_fd(sockfd);
+         return nullptr;
+     }
+     struct sockaddr_in serv_addr;
+@@ -672,9 +718,11 @@ socket_ptr socket_t::create_server(const char * host, int port) {
+     serv_addr.sin_port = htons(port);
+ 
+     if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
++        close_fd(sockfd);
+         return nullptr;
+     }
+     if (listen(sockfd, 1) < 0) {
++        close_fd(sockfd);
+         return nullptr;
+     }
+     return socket_ptr(new socket_t(std::make_unique<impl>(sockfd)));
+@@ -685,8 +733,9 @@ socket_ptr socket_t::connect(const char * host, int port) {
+     if (!is_valid_fd(sockfd)) {
+         return nullptr;
+     }
+-    if (!set_no_delay(sockfd)) {
+-        GGML_LOG_ERROR("Failed to set TCP_NODELAY\n");
++    if (!set_no_delay(sockfd) || !set_no_sigpipe(sockfd)) {
++        GGML_LOG_ERROR("Failed to configure TCP socket\n");
++        close_fd(sockfd);
+         return nullptr;
+     }
+     struct sockaddr_in addr;
+@@ -695,10 +744,12 @@ socket_ptr socket_t::connect(const char * host, int port) {
+     struct hostent * server = gethostbyname(host);
+     if (server == NULL) {
+         GGML_LOG_ERROR("Cannot resolve host '%s'\n", host);
++        close_fd(sockfd);
+         return nullptr;
+     }
+     memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
+     if (::connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++        close_fd(sockfd);
+         return nullptr;
+     }
+     return socket_ptr(new socket_t(std::make_unique<impl>(sockfd)));
+diff --git a/ggml/src/ggml-rpc/transport.h b/ggml/src/ggml-rpc/transport.h
+index 3f747ec..dd42590 100644
+--- a/ggml/src/ggml-rpc/transport.h
++++ b/ggml/src/ggml-rpc/transport.h
+@@ -24,6 +24,7 @@ struct socket_t {
+ 
+     void get_caps(uint8_t * local_caps);
+     void update_caps(const uint8_t * remote_caps);
++    void shutdown();
+ 
+     static socket_ptr create_server(const char * host, int port);
+     static socket_ptr connect(const char * host, int port);
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index c46377c..be29b59 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -1,5 +1,11 @@
+ llama_add_compile_flags()
+ 
++# Pure scheduler policy test: no model, backend, or RPC connection required.
++add_executable(test-server-prefill-budget test-server-prefill-budget.cpp)
++add_test(NAME test-server-prefill-budget COMMAND test-server-prefill-budget)
++add_executable(test-server-prefill-fairness test-server-prefill-fairness.cpp)
++add_test(NAME test-server-prefill-fairness COMMAND test-server-prefill-fairness)
++
+ function(llama_build source)
+     set(TEST_SOURCES ${source} ${ARGN})
+ 
+diff --git a/tests/test-rpc-multi-server.cpp b/tests/test-rpc-multi-server.cpp
+index 4502e2c..7f6eb4c 100644
+--- a/tests/test-rpc-multi-server.cpp
++++ b/tests/test-rpc-multi-server.cpp
+@@ -11,6 +11,16 @@ int main(int argc, char ** argv) {
+     const char * endpoint_a = argv[1];
+     const char * endpoint_b = argv[2];
+ 
++    // Loader/device queries happen before a backend or remote buffer exists.
++    // They must still share one endpoint dispatcher instead of opening a new
++    // TCP session for every query.
++    for (int i = 0; i < 8; ++i) {
++        size_t free_mem = 0;
++        size_t total_mem = 0;
++        ggml_backend_rpc_get_device_memory(endpoint_a, 0, &free_mem, &total_mem);
++        GGML_ASSERT(total_mem > 0);
++    }
++
+     ggml_backend_t backend_a = ggml_backend_rpc_init(endpoint_a, 0);
+     ggml_backend_t backend_b = ggml_backend_rpc_init(endpoint_b, 0);
+     GGML_ASSERT(backend_a != nullptr);
+diff --git a/tests/test-rpc-multi-server.sh b/tests/test-rpc-multi-server.sh
+index a8c7231..082f1d1 100755
+--- a/tests/test-rpc-multi-server.sh
++++ b/tests/test-rpc-multi-server.sh
+@@ -28,6 +28,30 @@ wait_for_port() {
+     return 1
+ }
+ 
++count_connections() {
++    python3 - "$1" <<'PY'
++import pathlib
++import sys
++path = pathlib.Path(sys.argv[1])
++try:
++    text = path.read_text()
++except FileNotFoundError:
++    text = ""
++print(sum(1 for line in text.splitlines() if "Accepted client connection" in line))
++PY
++}
++
++print_file() {
++    python3 - "$1" <<'PY'
++import pathlib
++import sys
++try:
++    print(pathlib.Path(sys.argv[1]).read_text(), end="")
++except FileNotFoundError:
++    pass
++PY
++}
++
+ "$server" --device CPU --host 127.0.0.1 --port "$port_a" >"$test_dir/server-a.log" 2>&1 &
+ pid_a=$!
+ "$server" --device CPU --host 127.0.0.1 --port "$port_b" >"$test_dir/server-b.log" 2>&1 &
+@@ -35,9 +59,23 @@ pid_b=$!
+ wait_for_port "$port_a"
+ wait_for_port "$port_b"
+ 
++baseline_a=$(count_connections "$test_dir/server-a.log")
+ "$client" "$endpoint_a" "$endpoint_b"
++after_a=$(count_connections "$test_dir/server-a.log")
++new_connections_a=$((after_a - baseline_a))
++if [[ "$new_connections_a" -ne 1 ]]; then
++    printf 'expected one endpoint-A connection, observed %s\n' "$new_connections_a" >&2
++    print_file "$test_dir/server-a.log" >&2
++    exit 1
++fi
+ 
+-if grep -q "invalid data ptr" "$test_dir/server-b.log"; then
+-    cat "$test_dir/server-b.log"
++if python3 - "$test_dir/server-b.log" <<'PY'
++import pathlib
++import sys
++text = pathlib.Path(sys.argv[1]).read_text()
++raise SystemExit(0 if "invalid data ptr" in text else 1)
++PY
++then
++    print_file "$test_dir/server-b.log"
+     exit 1
+ fi
+diff --git a/tests/test-server-prefill-budget.cpp b/tests/test-server-prefill-budget.cpp
+new file mode 100644
+index 0000000..6d19614
+--- /dev/null
++++ b/tests/test-server-prefill-budget.cpp
+@@ -0,0 +1,35 @@
++#include "../tools/server/server-prefill-budget.h"
++#include <cstdio>
++#include <cstdlib>
++
++static void check(int actual, int expected, const char * name) {
++    if (actual != expected) {
++        std::fprintf(stderr, "FAIL %s: got %d, expected %d\n", name, actual, expected);
++        std::exit(1);
++    }
++}
++
++int main() {
++    check(server_prefill_batch_limit(2048, 1, 1, 256), 257, "decode-active cap");
++    check(server_prefill_batch_limit(2048, 2, 2, 256), 130, "two decoders tighten budget");
++    check(server_prefill_batch_limit(2048, 3, 3, 256), 88, "three decoders tighten budget");
++    check(server_prefill_batch_limit(2048, 0, 0, 256), 2048, "prefill-only full throughput");
++    check(server_prefill_batch_limit(2048, 3, 3, 0), 2048, "disabled compatibility");
++    check(server_prefill_batch_limit(2048, 4, 4, 1), 5, "minimum aggregate prefill progress");
++    check(server_prefill_batch_limit(8, 7, 1, 256), 8, "remaining capacity clamp");
++    check(server_prefill_batch_limit(8, 8, 1, 256), 8, "full decode batch cannot admit");
++    check(server_prefill_batch_limit(8, 10, 2, 256), 10, "never discard admitted drafts");
++    check(server_prefill_batch_limit(2048, 30, 3, 256), 115, "draft tokens consume capacity not slots");
++    for (int n = 1; n <= 32; ++n) {
++        for (int d = 0; d <= n; ++d) {
++            for (int g = 1; g <= 4; ++g) {
++                const int limit = server_prefill_batch_limit(n, d, g, 7);
++                if (limit < d || limit > n || (d < n && limit == d)) {
++                    std::fprintf(stderr, "FAIL invariant n=%d d=%d g=%d limit=%d\n", n, d, g, limit);
++                    return 1;
++                }
++            }
++        }
++    }
++    std::puts("PASS server-prefill-budget: examples and exhaustive small-capacity invariants");
++}
+diff --git a/tools/rpc/CMakeLists.txt b/tools/rpc/CMakeLists.txt
+index 2891c7d..f515477 100644
+--- a/tools/rpc/CMakeLists.txt
++++ b/tools/rpc/CMakeLists.txt
+@@ -13,6 +13,24 @@ if (LLAMA_BUILD_TESTS AND UNIX AND NOT GGML_BACKEND_DL)
+             $<TARGET_FILE:ggml-rpc-server>
+             $<TARGET_FILE:test-rpc-multi-server>)
+     set_property(TEST test-rpc-multi-server PROPERTY LABELS main)
++
++    add_executable(test-rpc-connect-failure ${PROJECT_SOURCE_DIR}/tests/test-rpc-connect-failure.cpp)
++    target_link_libraries(test-rpc-connect-failure PRIVATE ggml ggml-rpc)
++    target_include_directories(test-rpc-connect-failure PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
++    add_test(
++        NAME test-rpc-connect-failure
++        COMMAND $<TARGET_FILE:test-rpc-connect-failure>)
++    set_property(TEST test-rpc-connect-failure PROPERTY LABELS main)
++
++    add_executable(test-rpc-reconnect ${PROJECT_SOURCE_DIR}/tests/test-rpc-reconnect.cpp)
++    target_link_libraries(test-rpc-reconnect PRIVATE ggml ggml-rpc)
++    target_include_directories(test-rpc-reconnect PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
++    add_test(
++        NAME test-rpc-reconnect
++        COMMAND bash ${PROJECT_SOURCE_DIR}/tests/test-rpc-reconnect.sh
++            $<TARGET_FILE:ggml-rpc-server>
++            $<TARGET_FILE:test-rpc-reconnect>)
++    set_property(TEST test-rpc-reconnect PROPERTY LABELS main)
+ endif()
+ 
+ if(LLAMA_TOOLS_INSTALL)
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index f78cfb3..4835fac 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1,4 +1,5 @@
+ #include "server-context.h"
++#include "server-prefill-budget.h"
+ #include "server-chat.h"
+ #include "server-common.h"
+ #include "server-http.h"
+@@ -905,6 +906,7 @@ private:
+ 
+     // slots / clients
+     std::vector<server_slot> slots;
++    size_t prefill_cursor = 0;
+ 
+     int trace = 0;        // env: LLAMA_TRACE
+     int slots_debug = 0;  // env: LLAMA_SERVER_SLOTS_DEBUG
+@@ -3087,6 +3089,8 @@ private:
+         // process in chunks of params.n_batch
+         int32_t n_batch  = llama_n_batch(ctx_tgt);
+         int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
++        const int32_t n_prefill_limit = server_prefill_batch_limit(
++                n_batch, batch.size(), generating.size(), params_base.n_prefill_budget);
+ 
+         auto & alora_scale       = batch.alora_scale;
+         auto & alora_disabled_id = batch.alora_disabled_id;
+@@ -3095,7 +3099,15 @@ private:
+         if (params_base.cont_batching || batch.size() == 0) {
+             bool add_ok = true; // false means the batch is full, skip remaining slots
+ 
+-            iterate(slots, [&](server_slot & slot) {
++            // Keep decode/draft order and slot storage untouched. Only rotate compatible
++            // pending prompts while the opt-in budget is active and capacity exists.
++            auto pending = server_prefill_order(slots, prefill_cursor,
++                    params_base.n_prefill_budget > 0 && !generating.empty() && batch.size() < n_prefill_limit,
++                    [&](server_slot & slot) {
++                        return (slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT) &&
++                               (!slot_batched || slot_batched->can_batch_with(slot));
++                    });
++            iterate(pending, [&](server_slot & slot) {
+                 if (!add_ok || batch.size() >= n_batch) {
+                     return; // batch is full, skip remaining slots
+                 }
+@@ -3115,6 +3127,11 @@ private:
+                     return;
+                 }
+ 
++                // Do not mutate another splittable prompt after the shared budget is spent.
++                if (slot.can_split() && batch.size() >= n_prefill_limit) {
++                    return;
++                }
++
+                 // this slot still has a prompt to be processed
+                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
+                     const auto & input_tokens = slot.task->tokens;
+@@ -3504,8 +3521,10 @@ private:
+                     const auto & spans = slot.task->params.message_spans;
+                     const auto last_user_pos = spans.last_user_message_pos();
+ 
+-                    // add prompt tokens for processing in the current batch
+-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
++                    // Bound splittable text admission only. Atomic embedding prompts retain
++                    // their original all-or-nothing admission; mtmd submits its own decode.
++                    const int32_t n_slot_limit = slot.can_split() ? n_prefill_limit : n_batch;
++                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_slot_limit) {
+                         // get next token to process
+                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
+                         if (cur_tok == LLAMA_TOKEN_NULL) {
+diff --git a/tools/server/server-prefill-budget.h b/tools/server/server-prefill-budget.h
+new file mode 100644
+index 0000000..8d95a50
+--- /dev/null
++++ b/tools/server/server-prefill-budget.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++#include <algorithm>
++#include <cstddef>
++#include <vector>
++
++// Rotate only eligible pending prompts, never the backing slot storage or decode list.
++// The cursor is a stable storage index, so idle/replaced slots cannot pin the order.
++template<class Slot, class Pending>
++inline std::vector<Slot *> server_prefill_order(
++        std::vector<Slot> & slots, size_t & cursor, bool active, Pending pending) {
++    std::vector<Slot *> result;
++    if (!active) {
++        for (auto & slot : slots) { result.push_back(&slot); }
++        return result;
++    }
++    if (slots.empty()) { return result; }
++    const size_t start = cursor % slots.size();
++    for (size_t offset = 0; offset < slots.size(); ++offset) {
++        const size_t index = (start + offset) % slots.size();
++        if (pending(slots[index])) {
++            if (result.empty()) { cursor = (index + 1) % slots.size(); }
++            result.push_back(&slots[index]);
++        }
++    }
++    return result;
++}
++
++// Total admission limit, including already-admitted decode/draft tokens.
++// Zero disables the policy. Never reduce the physical/logical context limits.
++inline int server_prefill_batch_limit(int n_batch, int n_decode_tokens, int n_generating, int budget) {
++    if (budget <= 0 || n_generating <= 0) {
++        return n_batch;
++    }
++    const int available = std::max(0, n_batch - n_decode_tokens);
++    const int allowance = std::min(available, std::max(1, budget / n_generating));
++    return n_decode_tokens + allowance;
++}
+diff --git a/tests/test-rpc-connect-failure.cpp b/tests/test-rpc-connect-failure.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/test-rpc-connect-failure.cpp
+@@ -0,0 +1,10 @@
++#include "ggml-rpc.h"
++
++int main() {
++    size_t free_mem = 0;
++    size_t total_mem = 0;
++    // Port 65534 is intentionally unused by this test. A connection failure
++    // must be reported without aborting the embedding process.
++    ggml_backend_rpc_get_device_memory("127.0.0.1:65534", 0, &free_mem, &total_mem);
++    return 0;
++}
+diff --git a/tests/test-rpc-reconnect.cpp b/tests/test-rpc-reconnect.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/test-rpc-reconnect.cpp
+@@ -0,0 +1,34 @@
++#include "ggml-rpc.h"
++
++#include <chrono>
++#include <cstdio>
++#include <thread>
++
++static size_t query_total(const char * endpoint) {
++    size_t free_mem = 0;
++    size_t total_mem = 0;
++    ggml_backend_rpc_get_device_memory(endpoint, 0, &free_mem, &total_mem);
++    return total_mem;
++}
++
++int main(int argc, char ** argv) {
++    if (argc != 2) {
++        return 2;
++    }
++    const char * endpoint = argv[1];
++    const size_t first = query_total(endpoint);
++    std::printf("first_total=%zu\n", first);
++    std::fflush(stdout);
++
++    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
++    const size_t second = query_total(endpoint);
++    std::printf("second_total=%zu\n", second);
++    std::fflush(stdout);
++
++    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
++    const size_t third = query_total(endpoint);
++    std::printf("third_total=%zu\n", third);
++    std::fflush(stdout);
++
++    return first > 0 && second == 0 && third > 0 ? 0 : 1;
++}
+diff --git a/tests/test-rpc-reconnect.sh b/tests/test-rpc-reconnect.sh
+new file mode 100644
+--- /dev/null
++++ b/tests/test-rpc-reconnect.sh
+@@ -0,0 +1,87 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++server=$1
++client=$2
++port=$((45000 + $$ % 10000))
++endpoint="127.0.0.1:${port}"
++test_dir=$(mktemp -d)
++server_pid=""
++client_pid=""
++
++cleanup() {
++    if [[ -n "$client_pid" ]]; then kill "$client_pid" 2>/dev/null || true; fi
++    if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; fi
++    rm -rf "$test_dir"
++}
++trap cleanup EXIT
++
++wait_for_port() {
++    local p=$1
++    for _ in {1..600}; do
++        if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
++            exec 3>&-
++            exec 3<&-
++            return 0
++        fi
++        sleep 0.05
++    done
++    return 1
++}
++
++wait_for_line() {
++    local file=$1
++    local needle=$2
++    for _ in {1..600}; do
++        if python3 - "$file" "$needle" <<'PY'
++import pathlib
++import sys
++path = pathlib.Path(sys.argv[1])
++needle = sys.argv[2]
++try:
++    present = needle in path.read_text()
++except FileNotFoundError:
++    present = False
++raise SystemExit(0 if present else 1)
++PY
++        then
++            return 0
++        fi
++        sleep 0.05
++    done
++    return 1
++}
++
++start_server() {
++    "$server" --device CPU --host 127.0.0.1 --port "$port" >"$test_dir/server.log" 2>&1 &
++    server_pid=$!
++    wait_for_port "$port"
++}
++
++start_server
++"$client" "$endpoint" >"$test_dir/client.log" 2>&1 &
++client_pid=$!
++wait_for_line "$test_dir/client.log" first_total=
++kill -TERM "$server_pid"
++wait "$server_pid" 2>/dev/null || true
++server_pid=""
++wait_for_line "$test_dir/client.log" second_total=
++start_server
++wait "$client_pid"
++client_pid=""
++
++python3 - "$test_dir/client.log" <<'PY'
++import pathlib
++import sys
++values = {}
++for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
++    key, value = line.split('=', 1)
++    values[key] = int(value)
++if values.get('first_total', 0) <= 0:
++    raise SystemExit('first query did not succeed')
++if values.get('second_total') != 0:
++    raise SystemExit(f"second query unexpectedly succeeded: {values}")
++if values.get('third_total', 0) <= 0:
++    raise SystemExit('reconnect query did not succeed')
++print(values)
++PY
+diff --git a/tests/test-server-prefill-fairness.cpp b/tests/test-server-prefill-fairness.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/test-server-prefill-fairness.cpp
+@@ -0,0 +1,50 @@
++#include "../tools/server/server-prefill-budget.h"
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++struct slot { int id; bool pending; int progress; };
++static void require(bool ok, const char * message) {
++    if (!ok) { std::fprintf(stderr, "FAIL %s\n", message); std::exit(1); }
++}
++int main() {
++    const auto pending = [](const slot & s) { return s.pending; };
++    std::vector<slot> slots = {{0, false, 0}, {1, true, 0}, {2, true, 0}, {3, true, 0}};
++    size_t cursor = 0;
++    // A full allowance is consumed by the first long prompt each turn.
++    for (int turn = 0; turn < 99; ++turn) {
++        int available = server_prefill_batch_limit(2048, 1, 1, 256) - 1;
++        for (auto * s : server_prefill_order(slots, cursor, true, pending)) {
++            if (s->pending) { s->progress += available; available = 0; }
++        }
++    }
++    for (size_t i = 1; i < slots.size(); ++i) {
++        require(slots[i].progress > 0, "every pending prefill must progress during active decode");
++        require(slots[i].progress == 33 * 256, "persistent pending slots receive equal turns");
++    }
++    // Disabled policy or no active decode uses the exact original order and cursor.
++    const size_t saved = cursor;
++    for (int budget : {0, 256}) {
++        const int generating = budget == 0 ? 2 : 0;
++        auto order = server_prefill_order(slots, cursor, budget > 0 && generating > 0, pending);
++        require(order.size() == slots.size(), "inactive path retains all slots");
++        for (size_t i = 0; i < slots.size(); ++i) {
++            require(order[i] == &slots[i], "inactive path preserves original slot ordering");
++        }
++        require(cursor == saved, "inactive path preserves cursor");
++    }
++    // A slot replacement and idle gap must not pin a later pending prompt.
++    slots[1].pending = false;
++    slots[2].progress = slots[3].progress = 0;
++    cursor = 1000;
++    for (int turn = 0; turn < 4; ++turn) {
++        auto order = server_prefill_order(slots, cursor, true, pending);
++        require(order.size() == 2, "only pending slots rotate");
++        ++order.front()->progress;
++    }
++    require(slots[2].progress == 2 && slots[3].progress == 2, "idle and reused slots preserve fairness");
++    for (size_t i = 0; i < slots.size(); ++i) { require(slots[i].id == int(i), "slot storage and decode order unchanged"); }
++    slots.clear();
++    require(server_prefill_order(slots, cursor, true, pending).empty(), "empty slot list is safe");
++    std::puts("PASS server-prefill-fairness: per-slot progress, inactive order, reuse, empty slots");
++}

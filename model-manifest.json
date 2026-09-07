@@ -1,0 +1,41 @@
+{
+  "repo": "unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF",
+  "revision": "b977d3c0ea2da58dbc12ddae8fb8951a7b3854d0",
+  "weight_bytes": 155095288672,
+  "files": [
+    {
+      "path": "UD-Q4_K_XL/DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00001-of-00005.gguf",
+      "bytes": 5304960,
+      "sha256": "1f2eb50c87f116e0dfe0d865b3afa193564156dc25f9b27e294bde0602ec5546"
+    },
+    {
+      "path": "UD-Q4_K_XL/DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00002-of-00005.gguf",
+      "bytes": 48935523072,
+      "sha256": "6a9aa38747abed3bf6a546d903ac4787a8580b63dd3d0353af725df2b5687b3b"
+    },
+    {
+      "path": "UD-Q4_K_XL/DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00003-of-00005.gguf",
+      "bytes": 48980787136,
+      "sha256": "e72d563a52466a56c2445eaf1fc31b611cdb8b536847a5e9feaae06d0c386859"
+    },
+    {
+      "path": "UD-Q4_K_XL/DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00004-of-00005.gguf",
+      "bytes": 49999168416,
+      "sha256": "e1edff48e98877be958ae6ca3b96ec2e780152b6d38fbeb73dd90b5b09b33f51"
+    },
+    {
+      "path": "UD-Q4_K_XL/DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00005-of-00005.gguf",
+      "bytes": 7174505088,
+      "sha256": "ea50c2b54db7bfc433adcfe69ce42c78d8eac12dc8adfd6b134fcbf0717a5656"
+    },
+    {
+      "path": "mmproj-DeepSeek-V4-Flash-Vision-Exp-BF16.gguf",
+      "bytes": 934455392,
+      "sha256": "17ff6b7bb26ffab434ec89847595eecff895ff4cc5fcfc2777a21e993e3a9be5",
+      "repo": "ggml-org/DeepSeek-V4-Flash-Vision-Exp-GGUF",
+      "revision": "5d829f12416e76edf53500c54cedf72c94e8c2e8"
+    }
+  ],
+  "model": "UD-Q4_K_XL/DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00001-of-00005.gguf",
+  "projector": "mmproj-DeepSeek-V4-Flash-Vision-Exp-BF16.gguf"
+}
